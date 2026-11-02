@@ -5,8 +5,8 @@ import { exportResponse } from "@/lib/leads";
 import { json } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
-// Direct downloads stream for as long as the host allows (Vercel Pro: up to 800 s). Huge ones use /api/exports.
-export const maxDuration = 800;
+// Direct downloads stream for up to 300 s (the most Vercel Hobby allows; Pro could go to 800). Huge ones use /api/exports.
+export const maxDuration = 300;
 
 /** Download every row a job has saved, across all its runs (streamed): /api/jobs/:id/rows?fmt=csv|xlsx */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; action: string }> }) {
