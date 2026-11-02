@@ -3,23 +3,36 @@
   "version": "1.0.0",
   "description": "",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
-    "typecheck": "tsc"
+    "dev": "next dev -p 4000",
+    "build": "next build",
+    "start": "next start -p 4000",
+    "typecheck": "tsc",
+    "db:migrate-sqlite": "node scripts/migrate-sqlite.mjs",
+    "worker": "tsx scripts/worker.ts",
+    "trigger:dev": "trigger dev",
+    "trigger:deploy": "trigger deploy"
   },
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@trigger.dev/sdk": "^4.8.3",
     "blitz-api-js": "^3.2.0",
     "exceljs": "^4.4.0",
-    "express": "^5.3.0"
+    "next": "^16.4.4",
+    "postgres": "^4.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "server-only": "^0.0.1",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6",
+    "@trigger.dev/build": "^4.8.3",
     "@types/node": "^26.6.6",
-    "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "trigger.dev": "^4.8.3",
+    "typescript": "^5.9.3"
   },
   "private": true
 }

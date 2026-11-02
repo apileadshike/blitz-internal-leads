@@ -1,0 +1,13 @@
+{
+  "name": "Daily hiring alert: SDR roles",
+  "steps": [
+    { "step": "tam_by_jobs", "params": {
+      "job": { "title": { "include": ["SDR", "Sales Development Representative"] } },
+      "company": { "hq": { "country_code": { "include": ["US"] } } } } },
+    { "step": "only_new", "params": { "watch_name": "sdr-hiring-us" } },
+    { "step": "waterfall_icp", "params": { "max_results": 1, "cascade": [ { "include_title": ["VP Sales", "Head of Sales", "CRO"] }, { "include_title": ["[CEO]", "Founder"] } ] } },
+    { "step": "find_email", "params": {} }
+  ],
+  "record_budget": 2000,
+  "repeat_every_hours": 24
+}

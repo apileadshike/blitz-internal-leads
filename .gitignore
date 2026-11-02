@@ -1,3 +1,10 @@
 node_modules/
 .env
 data/
+jobs/_deleted/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+.env.backup
+.trigger
+.next-build/

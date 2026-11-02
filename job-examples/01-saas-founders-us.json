@@ -1,0 +1,12 @@
+{
+  "name": "SaaS founders US",
+  "steps": [
+    { "step": "people_search", "params": {
+      "company": { "industry": { "include": ["Software Development"] }, "employee_range": ["11-50", "51-200"], "hq": { "country_code": ["US"] } },
+      "people": { "job_level": ["C-Team"] } } },
+    { "step": "find_email", "params": {} }
+  ],
+  "batch_size": 1000,
+  "record_budget": 5000,
+  "workers": 20
+}

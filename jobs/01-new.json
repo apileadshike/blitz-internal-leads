@@ -1,0 +1,51 @@
+{
+  "name": "new",
+  "steps": [
+    {
+      "step": "people_search",
+      "params": {
+        "company": {
+          "industry": {
+            "include": [
+              "Software Development"
+            ]
+          },
+          "employee_range": [
+            "11-50",
+            "51-200"
+          ],
+          "hq": {
+            "country_code": [
+              "US"
+            ]
+          }
+        },
+        "people": {
+          "job_level": [
+            "C-Team",
+            "VP",
+            "Director"
+          ],
+          "location": {
+            "country_code": [
+              "US"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "step": "find_email",
+      "params": {}
+    },
+    {
+      "step": "find_phone",
+      "params": {}
+    }
+  ],
+  "batch_size": 1000,
+  "record_budget": 500,
+  "workers": 20,
+  "skip_seen_people": true,
+  "skip_seen_companies": false
+}

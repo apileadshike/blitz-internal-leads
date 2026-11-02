@@ -1,0 +1,668 @@
+"use client";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Header } from "./header";
+import { PRESETS, type Pipeline } from "./presets";
+import { StepForm, cleanParams, humanize } from "./schema-form";
+import { DEFAULT_CHAIN, ImportPanel, baseName, buildImport, companyPair, estimateRecords, sourceFor, type ImportResult, type ImportState } from "./import-panel";
+import type { IdType } from "@/lib/idtypes";
+import { readImportFile } from "@/lib/import";
+import { uploadList } from "./import-upload";
+
+type Entity = "company" | "person" | "job";
+type CatalogStep = {
+  id: string; label: string; endpoint: string; group: "source" | "expand" | "enrich" | "filter" | "send"; help: string;
+  needs: Entity | null; gives: Entity[]; dedupe_on: Entity | null; docs: string | null;
+  schema: { type: "object"; properties: Record<string, any> };
+};
+type BuilderStep = { uid: number; id: string; params: Record<string, any> };
+type StageStats = {
+  id: string; label: string; group: string; dedupe_on: Entity | null; status: string;
+  received: number; waiting: number; in_flight: number; done: number; out: number; duplicates: number;
+  hits: number; errors: number; records: number; skipped: number; filtered: number; cached?: number;
+};
+type RunStats = { stages: StageStats[]; saved: number; records_used: number; max_records: number; failed?: number };
+type LogEv = { at: number; stage: string; message: string };
+type Row = Record<string, any>;
+
+const ADD_GROUPS: [string, string][] = [
+  ["expand", "Find people / jobs for each company"],
+  ["enrich", "Add data to each row"],
+  ["filter", "Filter / tag rows (free)"],
+  ["send", "Send rows somewhere"],
+];
+const PREFERRED = ["full_name", "job_title", "email", "phone", "company_name", "company_domain", "country", "icp_tier",
+  "committee_role", "icp_fit", "icp_fit_reasons", "job_change", "previous_company_name", "new_since_last_run",
+  "company_industry", "company_size", "company_hq_country", "job_posting_title", "matched_jobs", "matched_people",
+  "top_countries", "top_departments", "company_email_domain", "failed_step", "person_linkedin_url", "company_linkedin_url"];
+
+let uidSeq = 0;
+const nextUid = () => ++uidSeq;
+const loadSaved = (): Record<string, Pipeline> => JSON.parse(localStorage.getItem("pipelines") || "{}");
+
+export function Builder() {
+  const [catalog, setCatalog] = useState<CatalogStep[]>([]);
+  const byId = useMemo(() => Object.fromEntries(catalog.map((s) => [s.id, s])), [catalog]);
+  const [account, setAccount] = useState("Loading account…");
+
+  // builder state
+  const [steps, setSteps] = useState<BuilderStep[]>([]);
+  const [maxItems, setMaxItems] = useState(20);
+  const [all, setAll] = useState(false);
+  const [concurrency, setConcurrency] = useState(20);
+  const [maxRecords, setMaxRecords] = useState(500);
+  const [skipSeenPeople, setSkipSeenPeople] = useState(true);
+  const [skipSeenCompanies, setSkipSeenCompanies] = useState(false);
+  const [useCache, setUseCache] = useState(true);
+  const [preset, setPreset] = useState("");
+  const [saved, setSaved] = useState<Record<string, Pipeline>>({});
+  const [addValue, setAddValue] = useState("");
+  const [formError, setFormError] = useState("");
+
+  // import + jobs
+  const [imp, setImp] = useState<ImportState | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [jobName, setJobName] = useState("");
+  const [repeatHours, setRepeatHours] = useState("");
+  const [jobMsg, setJobMsg] = useState<React.ReactNode>(null);
+  const [creating, setCreating] = useState(false);
+  const [sideMsg, setSideMsg] = useState<React.ReactNode>(null);
+  /** An imported list being sent to the server: buttons that need it wait until it's done. */
+  const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
+  const uploadSeq = useRef(0);
+  const uploadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  // live run
+  const [runId, setRunId] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [stats, setStats] = useState<RunStats | null>(null);
+  const [logs, setLogs] = useState<LogEv[]>([]);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [newestCount, setNewestCount] = useState(0);
+
+  function loadPipeline(p: Pipeline, cat = byId) {
+    setSteps(p.steps.filter((s) => cat[s.step]).map((s) => ({ uid: nextUid(), id: s.step, params: structuredClone(s.params ?? {}) })));
+    setAll(p.maxItems === 0);
+    if (p.maxItems) setMaxItems(p.maxItems);
+    if (p.concurrency) setConcurrency(p.concurrency);
+    if (p.maxRecords) setMaxRecords(p.maxRecords);
+    if (p.skipSeenPeople !== undefined) setSkipSeenPeople(p.skipSeenPeople);
+    if (p.skipSeenCompanies !== undefined) setSkipSeenCompanies(p.skipSeenCompanies);
+    if (p.useCache !== undefined) setUseCache(p.useCache);
+  }
+
+  // Boot: step catalog + account info, default recipe, and "Watch" links from the Jobs page.
+  useEffect(() => {
+    setSaved(loadSaved());
+    Promise.all([fetch("/api/steps").then((r) => r.json()), fetch("/api/meta").then((r) => r.json())]).then(([cat, meta]: [CatalogStep[], any]) => {
+      setCatalog(cat);
+      const a = meta.account;
+      setAccount(a?.error
+        ? `API key problem: ${a.error}`
+        : `${a.active_plans?.[0]?.name ?? "plan"} · ${Number(a.records_remaining).toLocaleString()} records left · ${a.max_requests_per_seconds} req/s per endpoint · DB: ${meta.db.people} people, ${meta.db.companies} companies`);
+      const first = Object.keys(PRESETS)[0];
+      loadPipeline(PRESETS[first], Object.fromEntries(cat.map((s) => [s.id, s])));
+      setPreset("p:" + first); // the default recipe is loaded, so show its name
+      const m = location.hash.match(/run=([\w-]+)/);
+      if (m) watch(m[1]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── builder helpers ──
+  const entitiesBefore = (index: number) => {
+    const have = new Set<Entity>();
+    steps.slice(0, index).forEach((s) => byId[s.id]?.gives.forEach((g) => have.add(g)));
+    return have;
+  };
+  const haveAll = entitiesBefore(steps.length);
+  const addOptions = catalog.filter((c) => c.group !== "source");
+  const firstAddable = addOptions.find((c) => !c.needs || haveAll.has(c.needs))?.id ?? "";
+  const addSelected = addOptions.some((c) => c.id === addValue && (!c.needs || haveAll.has(c.needs))) ? addValue : firstAddable;
+
+  const updateStep = (i: number, patch: Partial<BuilderStep>) => setSteps((all) => all.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  const move = (i: number) => setSteps((all) => { const n = [...all]; [n[i - 1], n[i]] = [n[i], n[i - 1]]; return n; });
+  const remove = (i: number) => setSteps((all) => all.filter((_, j) => j !== i));
+  const add = () => { if (addSelected) setSteps((all) => [...all, { uid: nextUid(), id: addSelected, params: {} }]); };
+
+  const currentPipeline = (): Required<Pipeline> => ({
+    steps: steps.map((s) => ({ step: s.id, params: cleanParams(s.params) ?? {} })),
+    maxItems: all ? 0 : Number(maxItems),
+    concurrency: Number(concurrency),
+    maxRecords: Number(maxRecords),
+    skipSeenPeople,
+    skipSeenCompanies,
+    useCache,
+  });
+
+  // ── recipes + saved pipelines (stored in this browser) ──
+  const onPreset = (v: string) => {
+    setPreset(v);
+    if (!v) return;
+    const name = v.slice(2);
+    const p = v.startsWith("p:") ? PRESETS[name] : saved[name];
+    if (p) loadPipeline(p);
+  };
+  const savePipeline = () => {
+    const name = prompt("Name this pipeline:");
+    if (!name) return;
+    const next = { ...loadSaved(), [name]: currentPipeline() };
+    localStorage.setItem("pipelines", JSON.stringify(next));
+    setSaved(next);
+    setPreset("s:" + name); // show the pipeline just saved
+  };
+
+  // ── run ──
+  const start = async (override?: Partial<Pipeline>) => {
+    setFormError("");
+    const r = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...currentPipeline(), ...override }) });
+    const j = await r.json();
+    if (!r.ok) return setFormError(j.error);
+    watch(j.id);
+  };
+
+  // ── Cost preview + "Test 10 rows" ──
+  const [preview, setPreview] = useState<React.ReactNode>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const listCount = () => String(steps[0]?.params?.list ?? "").split(/[\r\n,;]+/).filter((x) => x.trim()).length;
+  const isList = () => !!steps[0] && /^list_/.test(steps[0].id);
+  const estimateCost = async () => {
+    setFormError(""); setPreview(null);
+    if (!steps.length) return;
+    // A pasted/imported list: count it, no API call.
+    if (isList()) {
+      const typed = listCount();
+      const up = Number(steps[0].params?.upload_count ?? 0);
+      const n = typed + up;
+      // In a company list, LinkedIn URLs are free: only the domains cost a lookup.
+      const linkedin = String(steps[0].params?.list ?? "").split(/[\r\n,;]+/).filter((x) => /linkedin\.com\//i.test(x)).length;
+      const paid = (steps[0].id === "list_domains" ? typed - linkedin : typed) + Number(steps[0].params?.upload_paid ?? up);
+      const est = estimateRecords(steps, byId, n, paid);
+      setPreview(<>📋 {n.toLocaleString()} rows in the list → up to <b>{est.toLocaleString()}</b> records for everything (lookups that find nothing are free, so usually less).</>);
+      return;
+    }
+    if (!/^POST /.test(byId[steps[0].id]?.endpoint ?? "")) {
+      setPreview(<>Step 1 reads your own database: no search cost. Later steps cost up to {estimateRecords(steps, byId, 1)} record(s) per row.</>);
+      return;
+    }
+    setPreviewing(true);
+    try {
+      const r = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ steps: currentPipeline().steps }) });
+      const j = await r.json();
+      if (!r.ok) return setFormError(`Estimate failed: ${j.error}`);
+      const n = all ? j.usable : Math.min(j.usable, Number(maxItems));
+      const est = estimateRecords(steps, byId, n);
+      setPreview(<>🔎 Blitz has <b>{Number(j.total).toLocaleString()}</b> matches{j.total > 50_000 ? " (one search returns at most 50,000; split it with a job split)" : ""}.
+        {" "}For {all ? "all results" : `your max of ${Number(maxItems).toLocaleString()}`} ({n.toLocaleString()} rows): up to <b>{est.toLocaleString()}</b> records.
+        {" "}<span className="muted">(This check used {j.records_used} record.)</span></>);
+    } finally {
+      setPreviewing(false);
+    }
+  };
+  /** Run the pipeline on its first 10 rows only, to check the results before a big job. */
+  const testTen = () => {
+    const est = Math.max(10, estimateRecords(steps, byId, 10));
+    void start({ maxItems: 10, maxRecords: Math.min(est, Number(maxRecords) || est) });
+  };
+  const stop = () => { if (runId) fetch(`/api/runs/${runId}/stop`, { method: "POST" }); };
+  /** Put the leads whose step failed back into the queue at that step, and watch again. */
+  const rerunFailed = async () => {
+    if (!runId) return;
+    const r = await fetch(`/api/runs/${runId}/rerun-failed`, { method: "POST" });
+    const j = await r.json();
+    if (!r.ok) return setFormError(j.error);
+    watch(runId);
+  };
+
+  // ── Create job: one click, everything comes from the form ──
+  const createJob = async () => {
+    setFormError(""); setJobMsg(null);
+    const p = currentPipeline();
+    const name = jobName.trim() || (preset ? preset.slice(2) : "") || `Job ${new Date().toLocaleString()}`;
+    setCreating(true);
+    try {
+      const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        name, steps: p.steps, record_budget: p.maxRecords, workers: p.concurrency,
+        skip_seen_people: p.skipSeenPeople, skip_seen_companies: p.skipSeenCompanies, use_cache: p.useCache,
+        repeat_every_hours: Number(repeatHours) > 0 ? Number(repeatHours) : undefined,
+      }) });
+      const j = await r.json();
+      if (!r.ok) return setFormError(j.error);
+      setJobMsg(<>✓ Job <b>{name}</b> created. It runs in the background until done. <a href="/jobs">Open Jobs →</a></>);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  // ── Import a file ──
+  /** Does `rest` work after source `src`? (each step's input exists by then) */
+  const chainFits = (src: string, rest: string[]) => {
+    const have = new Set(byId[src]?.gives ?? []);
+    for (const id of rest) {
+      const d = byId[id];
+      if (!d || d.group === "source" || (d.needs && !have.has(d.needs))) return false;
+      d.gives.forEach((g) => have.add(g));
+    }
+    return true;
+  };
+
+  function applyImport(st: ImportState, current = steps) {
+    setImp(st);
+    const { values, inputRows, paidFirst } = buildImport(st);
+    const src = sourceFor(st);
+    const rest = current.slice(1);
+    const tail = rest.length && chainFits(src, rest.map((s) => s.id))
+      ? rest
+      : DEFAULT_CHAIN[st.type].map((s) => ({ uid: nextUid(), id: s.step, params: structuredClone(s.params) }));
+    const uid = nextUid();
+    const info = { upload_name: st.result.file, upload_count: values.length, upload_paid: paidFirst };
+    const next = [{ uid, id: src, params: { list: "", ...info, upload_pending: true } }, ...tail];
+    setSteps(next);
+    setAll(true); // every row of the file
+    const est = estimateRecords(next, byId, values.length, paidFirst);
+    if (est > 0) setMaxRecords(est);
+    setPreset("");
+    // Send the list to the server (in chunks), a moment after the last change in the import panel.
+    const seq = ++uploadSeq.current;
+    if (uploadTimer.current) clearTimeout(uploadTimer.current);
+    setUploading({ done: 0, total: values.length });
+    uploadTimer.current = setTimeout(async () => {
+      try {
+        const id = await uploadList(st.result.file, values, inputRows, (done, total) => { if (seq === uploadSeq.current) setUploading({ done, total }); });
+        if (seq !== uploadSeq.current) return; // a newer import replaced this one
+        setSteps((all) => all.map((x) => (x.uid === uid ? { ...x, params: { ...x.params, upload_id: id, upload_pending: undefined } } : x)));
+        setUploading(null);
+      } catch (e) {
+        if (seq !== uploadSeq.current) return;
+        setUploading(null);
+        setFormError(`Upload failed: ${(e as Error).message}`);
+      }
+    }, 500);
+  }
+
+  /** The other kind of lead in the same file (people vs companies) as its own job, with the usual steps. */
+  async function createSideJob(column: number, type: IdType) {
+    if (!imp) return;
+    const st: ImportState = { ...imp, column, type, combine: !!companyPair(imp.result) };
+    const { values, inputRows, paidFirst } = buildImport(st);
+    setSideMsg(<>Uploading {values.length.toLocaleString()} rows…</>);
+    let uploadId: string;
+    try { uploadId = await uploadList(imp.result.file, values, inputRows); } catch (e) { setSideMsg(null); return setFormError(`Upload failed: ${(e as Error).message}`); }
+    const jobSteps = [
+      { step: sourceFor(st), params: { list: "", upload_id: uploadId, upload_name: imp.result.file, upload_count: values.length, upload_paid: paidFirst } },
+      ...DEFAULT_CHAIN[type],
+    ];
+    const est = estimateRecords(jobSteps.map((s) => ({ id: s.step, params: s.params })), byId, values.length, paidFirst);
+    const kind = type === "person_url" || type === "email" || type === "phone" ? "people" : "companies";
+    const name = `${jobName || baseName(imp.result.file)} (${kind})`;
+    const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      name, steps: jobSteps, record_budget: Math.max(est, 1), workers: Number(concurrency),
+      skip_seen_people: skipSeenPeople, skip_seen_companies: skipSeenCompanies, use_cache: useCache,
+    }) });
+    const j = await r.json();
+    if (!r.ok) return setFormError(j.error);
+    setSideMsg(<>✓ Job <b>{name}</b> created ({values.length.toLocaleString()} rows, up to {est.toLocaleString()} records). <a href="/jobs">Open Jobs →</a></>);
+  }
+
+  async function onFile(f: File) {
+    setFormError(""); setJobMsg(null);
+    setImporting(true);
+    try {
+      // A saved pipeline or job file: load it into the builder.
+      if (/\.json$/i.test(f.name)) {
+        const p = JSON.parse(await f.text());
+        if (!Array.isArray(p.steps)) throw new Error("This JSON file has no \"steps\" list.");
+        loadPipeline({
+          steps: p.steps, maxItems: p.maxItems ?? 0, concurrency: p.concurrency ?? p.workers,
+          maxRecords: p.maxRecords ?? p.record_budget, skipSeenPeople: p.skipSeenPeople ?? p.skip_seen_people,
+          skipSeenCompanies: p.skipSeenCompanies ?? p.skip_seen_companies,
+        });
+        setJobName(p.name ?? baseName(f.name));
+        if (p.repeat_every_hours) setRepeatHours(String(p.repeat_every_hours));
+        setImp(null); setPreset("");
+        return;
+      }
+      // A list (CSV / Excel): detect the column, fill step 1.
+      // Read in the browser: big files never go through the server in one piece.
+      const res: ImportResult = await readImportFile(f);
+      if (!res.rows.length) throw new Error("No rows found in the file.");
+      const first = res.suggestion ?? { column: 0, type: "domain" as const };
+      if (!res.suggestion) setFormError("Couldn't tell what the file holds: pick the column and what it contains below.");
+      setJobName(baseName(f.name));
+      // A file with both LinkedIn company URLs and domains: LinkedIn first (free), domain as fallback.
+      const pair = companyPair(res);
+      const begin = pair && (first.type === "domain" || first.type === "company_url") ? { column: pair.li, type: "company_url" as const } : first;
+      setSideMsg(null);
+      applyImport({ result: res, column: begin.column, type: begin.type, keep: true, combine: !!pair });
+    } catch (e) {
+      setFormError(`Import failed: ${(e as Error).message}`);
+    } finally {
+      setImporting(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  }
+
+  // ── live view (Server-Sent Events) ──
+  const source = useRef<EventSource | null>(null);
+  const rowBuffer = useRef<Row[]>([]);
+  /**
+   * Follow a run live. The server closes each connection after ~40 s (hosting time
+   * limits); we reconnect from the last log/row we have, so nothing repeats or is missed.
+   */
+  const watchSeq = useRef(0);
+  function watch(id: string) {
+    source.current?.close();
+    const seq = ++watchSeq.current; // a newer watch() cancels this one
+    setRunId(id); setRunning(true); setStats(null); setLogs([]); setRows([]); setNewestCount(0);
+    rowBuffer.current = [];
+    const cursor = { log: 0, row: 0 };
+    let failures = 0;
+    const connect = () => {
+      if (seq !== watchSeq.current) return;
+      const es = new EventSource(`/api/runs/${id}/events?log=${cursor.log}&row=${cursor.row}`);
+      source.current = es;
+      let done = false;
+      es.onmessage = (m) => {
+        const ev = JSON.parse(m.data);
+        failures = 0;
+        if (ev.type === "stats") setStats(ev.stats);
+        else if (ev.type === "log") setLogs((l) => [ev, ...l]);
+        else if (ev.type === "row") rowBuffer.current.push(ev.row);
+        else if (ev.type === "cursor") { cursor.log = ev.log; cursor.row = ev.row; }
+        else if (ev.type === "reconnect") { done = true; es.close(); setTimeout(connect, 300); }
+        else if (ev.type === "finished") { done = true; es.close(); setRunning(false); }
+      };
+      es.onerror = () => {
+        if (done) return;
+        es.close(); // reconnect ourselves, from the saved position
+        if (++failures > 20) { setRunning(false); return; }
+        setTimeout(connect, Math.min(10_000, 1000 * failures));
+      };
+    };
+    connect();
+  }
+  // Rows can arrive hundreds per second: add them to the table in small bursts.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!rowBuffer.current.length) return;
+      const batch = rowBuffer.current;
+      rowBuffer.current = [];
+      setNewestCount(batch.length);
+      setRows((r) => [...r, ...batch]);
+    }, 250);
+    return () => { clearInterval(t); source.current?.close(); };
+  }, []);
+
+  const columns = useMemo(() => {
+    const known = PREFERRED.filter((c) => rows.some((r) => r[c] !== undefined)).slice(0, 12);
+    const fromFile = [...new Set(rows.slice(0, 50).flatMap((r) => Object.keys(r).filter((k) => k.startsWith("in_"))))].slice(0, 4);
+    return [...fromFile, ...known];
+  }, [rows]);
+  const shown = useMemo(() => rows.slice(-500).reverse(), [rows]);
+
+  return (
+    <>
+      <Header active="builder" right={<div className="muted">{account}</div>} />
+      <main>
+        {/* ───────── Builder ───────── */}
+        <section className="panel builder">
+          <h2>1 · Build your pipeline</h2>
+          <div className="recipe-bar">
+            <select value={preset} onChange={(e) => onPreset(e.target.value)}>
+              <option value="">Load a recipe…</option>
+              <optgroup label="Recipes">
+                {Object.keys(PRESETS).map((k) => <option key={k} value={"p:" + k}>{k}</option>)}
+              </optgroup>
+              {Object.keys(saved).length > 0 && (
+                <optgroup label="My saved pipelines">
+                  {Object.keys(saved).map((k) => <option key={k} value={"s:" + k}>{k}</option>)}
+                </optgroup>
+              )}
+            </select>
+            <button type="button" className="secondary" onClick={savePipeline} title="Save this pipeline in your browser">Save</button>
+            <button type="button" className="secondary" disabled={importing} onClick={() => fileInput.current?.click()}
+              title="CSV or Excel list of domains, LinkedIn URLs, emails or phones, or a saved pipeline/job (.json)">
+              {importing ? "Reading…" : "📂 Import file"}
+            </button>
+            <input ref={fileInput} type="file" hidden accept=".csv,.tsv,.txt,.xlsx,.json"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }} />
+          </div>
+          {imp && (
+            <ImportPanel state={imp} onChange={(st) => applyImport(st)} onClose={() => setImp(null)}
+              onSideJob={(c, t) => void createSideJob(c, t)} sideJobMsg={sideMsg}
+              estimate={steps.length ? (() => { const x = buildImport(imp); return estimateRecords(steps, byId, x.values.length, x.paidFirst); })() : null} />
+          )}
+          <p className="hint">Step 1 finds data (or import a file). Each step after that works on what the previous steps found. All steps run at the same time.</p>
+
+          <div>
+            {steps.map((s, i) => {
+              const def = byId[s.id];
+              if (!def) return null;
+              const have = entitiesBefore(i);
+              const invalid = i === 0 ? def.group !== "source" : def.group === "source" || (!!def.needs && !have.has(def.needs));
+              const hasFields = Object.keys(def.schema.properties).length > 0;
+              return (
+                <div key={s.uid}>
+                  <div className={"step" + (invalid ? " invalid" : "")}>
+                    <div className="step-h">
+                      <span className="num">{i + 1}</span>
+                      {i === 0 ? (
+                        // Step 1: choose any source
+                        <select value={s.id} onChange={(e) => updateStep(0, { id: e.target.value, params: {}, uid: nextUid() })}>
+                          {catalog.filter((c) => c.group === "source").map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                        </select>
+                      ) : (
+                        <>
+                          <b>{def.label}</b>
+                          <span className="ctrls">
+                            <button type="button" className="link" title="Move up" disabled={i === 1} onClick={() => move(i)}>↑</button>
+                            <button type="button" className="link" title="Remove" onClick={() => remove(i)}>✕</button>
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <div className="step-meta">
+                      <code>{def.endpoint}</code> · {def.help}
+                      {def.docs && <> <a href={def.docs} target="_blank">Setup guide →</a></>}
+                    </div>
+                    {invalid && <div className="error">{def.group === "source" ? "Sources can only be step 1" : `Needs ${def.needs} data. Add a step that provides it first.`}</div>}
+                    {i === 0 && s.params.upload_name && (
+                      <div className="upload-note">
+                        📄 {String(s.params.upload_name)}: {Number(s.params.upload_count ?? 0).toLocaleString()} rows
+                        {s.params.upload_id ? " uploaded" : uploading ? ` uploading… ${uploading.done.toLocaleString()} / ${uploading.total.toLocaleString()}` : " (not uploaded)"}
+                        {" "}(plus anything typed below){" "}
+                        <button type="button" className="link" onClick={() => updateStep(0, { params: { ...s.params, upload_id: undefined, upload_name: undefined, upload_count: undefined, upload_paid: undefined, upload_pending: undefined } })}>remove file</button>
+                      </div>
+                    )}
+                    {hasFields && (
+                      <div className="step-body">
+                        <StepForm schema={def.schema} value={s.params} onChange={(params) => updateStep(i, { params })} />
+                      </div>
+                    )}
+                  </div>
+                  {def.dedupe_on && (
+                    <div className="dedupe">🔁 duplicate check on <b>{def.dedupe_on}</b> (skips repeats in this run{def.dedupe_on === "job" ? "" : ", and earlier runs if ticked below"})</div>
+                  )}
+                  <div className="down">↓</div>
+                </div>
+              );
+            })}
+            {steps.length > 0 && (
+              <div className="step save">
+                <div className="step-h"><span className="num">✓</span><b>Save</b></div>
+                <div className="step-meta">Database + CSV/Excel download</div>
+              </div>
+            )}
+          </div>
+
+          <div className="add-step">
+            <select value={addSelected} onChange={(e) => setAddValue(e.target.value)}>
+              {ADD_GROUPS.map(([g, label]) => (
+                <optgroup key={g} label={label}>
+                  {addOptions.filter((c) => c.group === g).map((c) => {
+                    const ok = !c.needs || haveAll.has(c.needs);
+                    return <option key={c.id} value={c.id} disabled={!ok}>{c.label}{ok ? "" : ` (needs ${c.needs})`}</option>;
+                  })}
+                </optgroup>
+              ))}
+            </select>
+            <button type="button" className="secondary" onClick={add}>+ Add step</button>
+          </div>
+
+          <fieldset className="settings">
+            <legend>Run settings</legend>
+            <div className="row">
+              <label>Max results from step 1
+                <input type="number" min={1} value={maxItems} disabled={all} onChange={(e) => setMaxItems(Number(e.target.value))} />
+                <span className="inline all-toggle"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> All results</span>
+              </label>
+              <label>Workers per step <input type="number" min={1} max={50} value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} /></label>
+              <label>Record budget (stop at) <input type="number" min={1} value={maxRecords} onChange={(e) => setMaxRecords(Number(e.target.value))} /></label>
+            </div>
+            {all && <p className="hint">All results: keeps going until the filter has no more results (Blitz stops at 50,000 per search). The record budget still applies, so raise it for big pulls.</p>}
+            <label className="inline"><input type="checkbox" checked={skipSeenPeople} onChange={(e) => setSkipSeenPeople(e.target.checked)} /> Skip people already in my database</label>
+            <label className="inline"><input type="checkbox" checked={skipSeenCompanies} onChange={(e) => setSkipSeenCompanies(e.target.checked)} /> Skip companies already in my database</label>
+            <label className="inline" title="Emails, phones, company and person lookups done in the last 30–180 days are reused for free. Untick for fresh data.">
+              <input type="checkbox" checked={useCache} onChange={(e) => setUseCache(e.target.checked)} /> Reuse recent lookup answers (free) instead of paying again
+            </label>
+          </fieldset>
+
+          <fieldset className="settings">
+            <legend>Job (runs in the background until done)</legend>
+            <div className="row">
+              <label>Job name <input value={jobName} placeholder="e.g. SaaS founders US" onChange={(e) => setJobName(e.target.value)} /></label>
+              <label>Repeat every (hours) <input type="number" min={0} value={repeatHours} placeholder="once" onChange={(e) => setRepeatHours(e.target.value)} /></label>
+            </div>
+            <p className="hint">A job uses every result (not the &quot;max results&quot; above) and stops at the record budget.</p>
+          </fieldset>
+
+          <div className="actions">
+            <button type="button" onClick={createJob} disabled={creating || !steps.length || !!uploading}
+              title="Add this pipeline to the job queue. It runs in the background until the list or search is done.">
+              {creating ? "Creating…" : uploading ? "Uploading list…" : "⏱ Create job"}
+            </button>
+            <button type="button" className="secondary" onClick={testTen} disabled={running || !steps.length || !!uploading} title="Run only the first 10 rows now, to check the results">🧪 Test 10 rows</button>
+            <button type="button" className="secondary" onClick={() => void estimateCost()} disabled={previewing || !steps.length}
+              title="Estimate the cost. For a search this asks Blitz how many matches there are (uses 1 record).">
+              {previewing ? "Checking…" : "💰 Estimate cost"}
+            </button>
+          </div>
+          <div className="actions">
+            <button type="button" className="secondary" onClick={() => void start()} disabled={running || !!uploading}>▶ Run now (uses max results)</button>
+            <button type="button" className="secondary" onClick={stop} disabled={!running}>■ Stop</button>
+          </div>
+          {preview && <div className="preview-line">{preview}</div>}
+          {formError && <div className="error">{formError}</div>}
+          {jobMsg && <div className="ok-line">{jobMsg}</div>}
+        </section>
+
+        {/* ───────── Live ───────── */}
+        <section className="panel">
+          <div className="row between">
+            <h2>2 · Live pipeline</h2>
+            <div className="muted">{stats ? `${stats.records_used.toLocaleString()} / ${stats.max_records.toLocaleString()} records used` : ""}</div>
+          </div>
+          <div className="pipeline">
+            {stats ? <Stages stats={stats} byId={byId} /> : <p className="muted">Build a pipeline and press Run.</p>}
+          </div>
+          {runId && !running && (stats?.failed ?? 0) > 0 && (
+            <div className="rerun-line">
+              ⚠ {stats!.failed} lead(s) had a step fail (see the <b>Failed step</b> column).{" "}
+              <button type="button" className="small" onClick={() => void rerunFailed()}>↻ Re-run failed</button>
+              <span className="muted"> Only those leads, from the step that failed.</span>
+            </div>
+          )}
+          {runId && !running && (
+            <div className="downloads">
+              <a className="btn secondary" href={`/api/runs/${runId}/rows?fmt=csv`}>⬇ This run (CSV)</a>
+              <a className="btn secondary" href={`/api/runs/${runId}/rows?fmt=xlsx`}>⬇ This run (Excel)</a>
+            </div>
+          )}
+          <h3>Activity</h3>
+          <ol id="log">
+            {logs.map((ev, i) => (
+              <li key={logs.length - i}><span className="t">{(ev.at / 1000).toFixed(1)}s</span><span className="s">{ev.stage}</span>{ev.message}</li>
+            ))}
+          </ol>
+        </section>
+
+        {/* ───────── Results ───────── */}
+        <section className="panel wide">
+          <div className="row between">
+            <h2>3 · Results <span className="muted">{rows.length ? `(${rows.length})` : ""}</span></h2>
+            <div>
+              <a className="btn secondary" href="/api/rows?fmt=csv">⬇ Everything (CSV)</a>{" "}
+              <a className="btn secondary" href="/api/rows?fmt=xlsx">⬇ Everything (Excel)</a>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr>{columns.map((c) => <th key={c}>{humanize(c)}</th>)}</tr></thead>
+              <tbody>
+                {shown.length === 0 ? (
+                  <tr className="empty"><td>Rows appear here as soon as each one finishes the last step.</td></tr>
+                ) : shown.map((r, i) => (
+                  <tr key={rows.length - i} className={i < newestCount ? "new" : undefined}>
+                    {columns.map((c) => <Cell key={c} row={r} col={c} />)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </>
+  );
+}
+
+function Cell({ row, col }: { row: Row; col: string }) {
+  const v = row[col];
+  if (v === undefined) {
+    const status = col === "email" ? row.email_status : col === "phone" ? row.phone_status : "";
+    return <td><span className="none">{String(status || "").replace(/_/g, " ")}</span></td>;
+  }
+  if (/_url$/.test(col)) return <td><a href={String(v)} target="_blank" rel="noopener">link</a></td>;
+  return <td title={String(v)}>{String(v).slice(0, 60)}</td>;
+}
+
+function Kv({ k, v, cls = "" }: { k: string; v: number; cls?: string }) {
+  return <div className={"kv " + cls}><span>{k}</span><b>{Number(v).toLocaleString()}</b></div>;
+}
+
+function Stages({ stats, byId }: { stats: RunStats; byId: Record<string, CatalogStep> }) {
+  const hitLabels: Record<string, string> = { source: "", expand: "found", enrich: "found", filter: "kept", send: "sent" };
+  const allDone = stats.stages.every((s) => s.status !== "running");
+  return (
+    <>
+      {stats.stages.map((s, i) => {
+        const busy = s.status === "running" && (i === 0 || s.in_flight > 0);
+        const cls = s.status === "running" ? (busy ? "running" : "") : s.status;
+        const hitLabel = hitLabels[s.group];
+        return (
+          <div key={i} style={{ display: "contents" }}>
+            <div className={"stage " + cls}>
+              <div className="stage-h"><span className="dot" /><span className="num">{i + 1}</span>{s.label}</div>
+              <div className="big">{(i === 0 ? s.out + s.duplicates : s.done).toLocaleString()}</div>
+              <div className="muted">{i === 0 ? "results" : "processed"}</div>
+              {i > 0 && <><Kv k="working now" v={s.in_flight} /><Kv k="waiting" v={s.waiting} /></>}
+              {hitLabel && i > 0 && <Kv k={hitLabel} v={s.hits} />}
+              {s.dedupe_on && <Kv k={`duplicate ${s.dedupe_on}s skipped`} v={s.duplicates} />}
+              <Kv k="passed on" v={s.out} />
+              {s.filtered > 0 && <Kv k="removed by filter" v={s.filtered} />}
+              {s.skipped > 0 && <Kv k={`skipped (no ${byId[s.id]?.needs ?? "input"})`} v={s.skipped} />}
+              {s.errors > 0 && <Kv k="errors" v={s.errors} cls="err" />}
+              {(s.cached ?? 0) > 0 && <Kv k="from cache (free)" v={s.cached!} />}
+              <Kv k="records" v={s.records} />
+            </div>
+            <div className="arrow">→</div>
+          </div>
+        );
+      })}
+      <div className={"stage " + (allDone ? "done" : "")}>
+        <div className="stage-h"><span className="dot" /><span className="num">✓</span>Save</div>
+        <div className="big">{stats.saved.toLocaleString()}</div>
+        <div className="muted">rows saved</div>
+      </div>
+    </>
+  );
+}
