@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blitz Lead Engine</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <h1>Blitz Lead Engine</h1>
+  <div id="account" class="muted">Loading account…</div>
+</header>
+
+<main>
+  <!-- ───────── Builder ───────── -->
+  <section class="panel builder">
+    <h2>1 · Build your pipeline</h2>
+    <div class="recipe-bar">
+      <select id="presetSelect"><option value="">Load a recipe…</option></select>
+      <button type="button" class="secondary" id="saveBtn" title="Save this pipeline in your browser">Save</button>
+    </div>
+    <p class="hint">Step 1 finds data. Each step after that works on what the previous steps found. All steps run at the same time.</p>
+
+    <div id="steps"></div>
+
+    <div class="add-step">
+      <select id="addSelect"></select>
+      <button type="button" id="addBtn" class="secondary">+ Add step</button>
+    </div>
+
+    <fieldset class="settings">
+      <legend>Run settings</legend>
+      <div class="row">
+        <label>Max results from step 1
+          <input type="number" id="maxItems" value="20" min="1" />
+          <span class="inline all-toggle"><input type="checkbox" id="allItems" /> All results</span>
+        </label>
+        <label>Workers per step <input type="number" id="concurrency" value="20" min="1" max="50" /></label>
+        <label>Record budget (stop at) <input type="number" id="maxRecords" value="500" min="1" /></label>
+      </div>
+      <p class="hint" id="allHint" hidden>All results: keeps going until the filter has no more results (Blitz stops at 50,000 per search). The record budget still applies, so raise it for big pulls.</p>
+      <label class="inline"><input type="checkbox" id="skipSeenPeople" checked /> Skip people already in my database</label>
+      <label class="inline"><input type="checkbox" id="skipSeenCompanies" /> Skip companies already in my database</label>
+    </fieldset>
+
+    <div class="actions">
+      <button type="button" id="startBtn">▶ Run pipeline</button>
+      <button type="button" id="stopBtn" class="secondary" disabled>■ Stop</button>
+      <span id="formError" class="error"></span>
+    </div>
+  </section>
+
+  <!-- ───────── Live ───────── -->
+  <section class="panel">
+    <div class="row between">
+      <h2>2 · Live pipeline</h2>
+      <div class="muted" id="budget"></div>
+    </div>
+    <div class="pipeline" id="pipeline"><p class="muted">Build a pipeline and press Run.</p></div>
+    <div class="downloads" id="downloads" hidden>
+      <a id="dlCsv" class="btn secondary">⬇ This run (CSV)</a>
+      <a id="dlXlsx" class="btn secondary">⬇ This run (Excel)</a>
+    </div>
+    <h3>Activity</h3>
+    <ol id="log"></ol>
+  </section>
+
+  <!-- ───────── Results ───────── -->
+  <section class="panel wide">
+    <div class="row between">
+      <h2>3 · Results <span class="muted" id="rowCount"></span></h2>
+      <div><a class="btn secondary" href="/api/rows.csv">⬇ Everything (CSV)</a> <a class="btn secondary" href="/api/rows.xlsx">⬇ Everything (Excel)</a></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="tbody"><tr class="empty"><td>Rows appear here as soon as each one finishes the last step.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script src="form.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
