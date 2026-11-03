@@ -29,6 +29,7 @@ export type JobSettings = {
   skip_seen_companies: boolean;
   repeat_every_hours: number | null;
   use_cache: boolean;           // reuse recent lookup answers (default on)
+  max_results: number;          // results to take from step 1 per cycle (0 = all)
 };
 export type JobRow = {
   id: number; key: string; file: string; name: string; steps: StepConfig[]; settings: JobSettings | Record<string, never>; hash: string;
@@ -110,6 +111,7 @@ function parseJob(file: string, j: JobFile): Parsed[] | { error: string } {
     skip_seen_companies: j.skip_seen_companies === true,
     repeat_every_hours: j.repeat_every_hours ? Math.max(0.1, Number(j.repeat_every_hours)) : null,
     use_cache: j.use_cache !== false,
+    max_results: num(j.max_results, 0, 0, 10_000_000),
   };
   const make = (steps: StepConfig[], suffix?: string): Parsed => ({
     key: suffix ? `${file}#${suffix}` : file,
@@ -345,7 +347,7 @@ export class Scheduler {
       return;
     }
     const runId = await createRun({
-      steps: job.steps, maxItems: 0, concurrency: st.workers, maxRecords: st.record_budget,
+      steps: job.steps, maxItems: st.max_results ?? 0, concurrency: st.workers, maxRecords: st.record_budget,
       skipSeenPeople: st.skip_seen_people, skipSeenCompanies: st.skip_seen_companies, useCache: st.use_cache !== false,
     }, { jobId: job.id });
     await patch(job.id, {
@@ -466,7 +468,7 @@ export class Scheduler {
         id: j.id, name: j.name, file: j.file, status: j.status, position: j.position,
         pages: run?.source_pages ?? 0, rows: j.rows + (run && j.status !== "done" ? run.saved : 0),
         records: run && j.status !== "done" ? run.records_used : 0, records_total: j.records_total + (run && j.status !== "done" ? run.records_used : 0),
-        record_budget: st?.record_budget ?? null, repeat_every_hours: st?.repeat_every_hours ?? null,
+        record_budget: st?.record_budget ?? null, repeat_every_hours: st?.repeat_every_hours ?? null, max_results: st?.max_results ?? 0,
         batches: run?.source_count ?? 0, cycles: j.cycles,
         search_done: j.status === "done" || !!run?.source_exhausted, has_progress: !!run && !run.source_exhausted && run.source_pages > 0,
         steps: j.steps.map((s) => s.step),

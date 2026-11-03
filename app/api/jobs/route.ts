@@ -35,6 +35,7 @@ export async function POST(req: Request) {
     skip_seen_people: b.skip_seen_people !== false,
     skip_seen_companies: b.skip_seen_companies === true,
     use_cache: b.use_cache !== false,
+    max_results: Number(b.max_results) > 0 ? Math.floor(Number(b.max_results)) : 0,
     ...(Number(b.repeat_every_hours) > 0 ? { repeat_every_hours: Number(b.repeat_every_hours) } : {}),
   });
   if ("error" in created) return json({ error: created.error }, 400);

@@ -224,6 +224,7 @@ export function Builder() {
       const r = await fetch("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
         name, steps: p.steps, record_budget: p.maxRecords, workers: p.concurrency,
         skip_seen_people: p.skipSeenPeople, skip_seen_companies: p.skipSeenCompanies, use_cache: p.useCache,
+        max_results: p.maxItems, // 0 = All results
         repeat_every_hours: Number(repeatHours) > 0 ? Number(repeatHours) : undefined,
       }) });
       const j = await r.json();
@@ -533,7 +534,7 @@ export function Builder() {
               <label>Job name <input value={jobName} placeholder="e.g. SaaS founders US" onChange={(e) => setJobName(e.target.value)} /></label>
               <label>Repeat every (hours) <input type="number" min={0} value={repeatHours} placeholder="once" onChange={(e) => setRepeatHours(e.target.value)} /></label>
             </div>
-            <p className="hint">A job uses every result (not the &quot;max results&quot; above) and stops at the record budget.</p>
+            <p className="hint">A job takes &quot;Max results&quot; from step 1 (or everything when &quot;All results&quot; is ticked) and never spends more than the record budget: it fetches only what the budget can also enrich.</p>
           </fieldset>
 
           <div className="actions">

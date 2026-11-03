@@ -5,7 +5,7 @@ import { Header } from "./header";
 type Job = {
   id: number; name: string; file: string; status: string; position: number;
   pages: number; rows: number; records: number; records_total: number;
-  record_budget: number | null; batch_size: number | null; repeat_every_hours: number | null;
+  record_budget: number | null; batch_size: number | null; repeat_every_hours: number | null; max_results?: number;
   batches: number; cycles: number; search_done: boolean; has_progress: boolean; steps: string[];
   next_run_at: string | null; note: string | null; error: string | null;
   run_id: string | null; live: boolean; stopping: boolean; started_at: string | null; finished_at: string | null;
@@ -129,7 +129,7 @@ export function JobsPage() {
                       <td className="grip" title="Drag to reorder">⋮⋮ {i + 1}</td>
                       <td>
                         <b>{j.name}</b>
-                        <div className="muted">{j.file} · {j.steps.join(" → ")}{j.repeat_every_hours ? ` · repeats every ${j.repeat_every_hours}h` : ""}</div>
+                        <div className="muted">{j.file} · {j.steps.join(" → ")}{j.max_results ? ` · max ${j.max_results.toLocaleString()} results` : " · all results"}{j.repeat_every_hours ? ` · repeats every ${j.repeat_every_hours}h` : ""}</div>
                       </td>
                       <td><span className={"pill " + status}>{status}</span>{due && <div className="muted">{due}</div>}</td>
                       <td>

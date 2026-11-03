@@ -39,6 +39,24 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void
   }));
 }
 
+/**
+ * Most records one result of step 1 can still cost in the steps after it: a paid lookup
+ * per lead, and an expand step (Waterfall, Employee Finder…) multiplying the leads after it.
+ */
+function laterCostPerResult(run: RunRow): number {
+  let mult = 1, cost = 0;
+  for (let i = 1; i < run.steps.length; i++) {
+    const def = stepDef(run, i);
+    const p = stepParams(run, i);
+    if (def.group === "expand") {
+      const per = Number(p.max_results ?? (p.per_role ? Number(p.per_role) * 3 : 1)) || 1;
+      cost += mult * per;
+      mult *= per;
+    } else if (/^POST /.test(def.endpoint)) cost += mult;
+  }
+  return cost;
+}
+
 export class Worker {
   private stopping = false;
   private loops: Promise<void>[] = [];
@@ -302,9 +320,11 @@ export class Worker {
   private async checkBudgets(runId: string, records: number) {
     if (!records) return;
     const [r] = await sql<{ records_used: number; max_records: number; job_id: number | null }[]>`
-      select records_used, max_records, job_id from runs where id = ${runId} and status = 'running'`;
+      select records_used, max_records, job_id from runs where id = ${runId} and status in ('running', 'draining')`;
     if (!r) return;
-    if (r.records_used >= r.max_records) await drainRun(sql, runId, `Record budget of ${r.max_records.toLocaleString()} reached`, "budget");
+    // The record budget is a ceiling: at it, every call for this run stops. Leads not finished
+    // stay in the queue, so raising the budget and resuming continues them.
+    if (r.records_used >= r.max_records) await stopRun(runId, `Record budget of ${r.max_records.toLocaleString()} reached`, "budget");
     else if (r.job_id) {
       const d = await this.daily();
       if (d.spent >= d.budget) await drainRun(sql, runId, "Daily record budget reached", "daily");
@@ -334,7 +354,23 @@ export class Worker {
       await sql`update runs set source_lease_until = now() + make_interval(secs => ${LEASE_SECONDS}) where id = ${runId}`;
 
       const def = stepDef(run, 0);
-      const remaining = run.max_items > 0 ? run.max_items - run.source_count : Infinity;
+      let remaining = run.max_items > 0 ? run.max_items - run.source_count : Infinity;
+      // Budget-aware paging: each fetched result will still need its later steps (email, phone…).
+      // Keep that money aside for the leads already queued, and fetch only what the rest can finish.
+      const later = laterCostPerResult(run);
+      const firstCost = /^POST /.test(def.endpoint) ? 1 : 0;
+      if (later + firstCost > 0) {
+        const [{ open }] = await sql<{ open: number }[]>`select count(*)::int as open from items where run_id = ${runId} and status in (1, 2)`;
+        const left = run.max_records - run.records_used - open * later;
+        const affordable = Math.floor(left / (later + firstCost));
+        if (affordable <= 0) {
+          await addLogs(sql, runId, [{ stage: def.label, message: `Fetching no more: the rest of the record budget (${Math.max(0, run.max_records - run.records_used).toLocaleString()}) is kept for the ${open.toLocaleString()} leads already found` }]);
+          await sql`update runs set source_done = true where id = ${runId}`;
+          await maybeFinish(runId);
+          return 0;
+        }
+        remaining = Math.min(remaining, affordable);
+      }
       const logs: { stage: string; message: string }[] = [];
       const items: Item[] = [];
       let records = 0, paged = false;

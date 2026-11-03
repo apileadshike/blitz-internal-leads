@@ -16,7 +16,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@trigger.dev/sdk": "^4.8.3",
+    "@trigger.dev/sdk": "4.8.3",
     "blitz-api-js": "^3.2.0",
     "exceljs": "^4.4.0",
     "next": "^16.4.4",
@@ -27,7 +27,7 @@
     "tsx": "^4.23.15"
   },
   "devDependencies": {
-    "@trigger.dev/build": "^4.8.3",
+    "@trigger.dev/build": "4.8.3",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

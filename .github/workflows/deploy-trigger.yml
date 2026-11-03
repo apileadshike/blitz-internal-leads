@@ -1,0 +1,43 @@
+# Deploys the Trigger.dev workers (src/trigger + the lib/ code they use) to Production
+# on every push to main that changes worker code. Vercel deploys the website on its own.
+#
+# Needs one GitHub secret: TRIGGER_ACCESS_TOKEN
+#   Trigger.dev dashboard → your avatar → Personal Access Tokens → create (starts with tr_pat_)
+#   GitHub → repo → Settings → Secrets and variables → Actions → New repository secret
+name: Deploy Trigger.dev tasks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lib/**"
+      - "src/trigger/**"
+      - "trigger.config.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "blitz-openapi.json"
+  workflow_dispatch: # "Run workflow" button on the Actions tab
+
+concurrency:
+  group: trigger-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy to Trigger.dev Production
+        # Same CLI version as @trigger.dev/sdk in package.json
+        run: npx trigger.dev@4.8.3 deploy --env prod
+        env:
+          TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
