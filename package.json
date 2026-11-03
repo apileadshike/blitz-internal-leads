@@ -8,7 +8,8 @@
     "start": "next start -p 4000",
     "typecheck": "tsc",
     "db:migrate-sqlite": "node scripts/migrate-sqlite.mjs",
-    "worker": "tsx scripts/worker.ts",
+    "worker": "bun scripts/worker.ts",
+    "worker:node": "tsx scripts/worker.ts",
     "trigger:dev": "trigger dev",
     "trigger:deploy": "trigger deploy"
   },
@@ -17,6 +18,7 @@
   "type": "module",
   "dependencies": {
     "@trigger.dev/sdk": "4.8.3",
+    "aws4fetch": "^1.0.20",
     "blitz-api-js": "^3.2.0",
     "exceljs": "^4.4.0",
     "next": "^16.4.4",

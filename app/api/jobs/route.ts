@@ -2,6 +2,7 @@ import { runtime } from "@/lib/runtime";
 import { recentAlerts, createJob, schedulerSettings, spentToday, JOBS_DIR } from "@/lib/jobs";
 import { validateSteps, type RunOptions } from "@/lib/engine/common";
 import { clamp, json } from "@/lib/http";
+import { sql } from "@/lib/pg";
 import type { Rec } from "@/lib/steps";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +17,10 @@ export async function GET() {
     running: jobs.filter((j) => j.live).length,
     alerts: await recentAlerts(),
     jobs_dir: JOBS_DIR,
+    // EXECUTION=worker: the separate worker's last heartbeat (null = it never ran)
+    worker_seen: process.env.EXECUTION === "worker"
+      ? (await sql<{ value: string }[]>`select value from settings where key = 'worker_heartbeat'`)[0]?.value ?? null
+      : undefined,
   });
 }
 

@@ -1,0 +1,26 @@
+# Render Blueprint: the worker as a Background Worker (always on, no web port).
+# Render dashboard → New → Blueprint → pick this repo. Fill in the secret values when asked.
+services:
+  - type: worker
+    name: blitz-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile.worker
+    plan: starter          # 512 MB. Use "standard" (2 GB) if big Excel exports run out of memory.
+    autoDeploy: true       # redeploys on every push to the branch
+    envVars:
+      - key: DATABASE_URL  # Supabase SESSION pooler (port 5432), no quotes
+        sync: false
+      - key: BLITZ_API_KEY
+        sync: false
+      - key: BLITZ_RPS
+        value: "50"
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false

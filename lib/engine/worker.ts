@@ -17,6 +17,7 @@ import { sql } from "../pg";
 import type { Item, StepCtx } from "../steps";
 import { describeError, hasInput, isTransient } from "./common";
 import { cacheEnabled, cachedClient, pruneCache } from "./cache";
+import { deleteFiles, type Store } from "../storage";
 import {
   ITEM, add, addLogs, bump, drainRun, failRun, getRun, handOff, maybeFinish, stepDef, stepParams, stopRun,
   type Candidate, type Counters, type RunRow,
@@ -459,14 +460,20 @@ export class Worker {
       await pruneCache();
       await sql`delete from alerts where at < now() - interval '30 days'`;
       // Imported lists nobody uses any more (no job, no unfinished run points to them).
-      await sql`
+      const oldUploads = await sql<{ object_key: string | null }[]>`
         with old as (
           select u.id from uploads u
           where u.created_at < now() - interval '30 days'
             and not exists (select 1 from jobs j where j.steps->0->'params'->>'upload_id' = u.id)
             and not exists (select 1 from runs r where r.status <> 'done' and r.steps->0->'params'->>'upload_id' = u.id)
         ), gone as (delete from upload_rows where upload_id in (select id from old))
-        delete from uploads where id in (select id from old)`;
+        delete from uploads where id in (select id from old) returning object_key`;
+      await deleteFiles(oldUploads.flatMap((u) => (u.object_key ? [u.object_key] : [])), "r2");
+      // Export files: download links last an hour, so files older than a week are only taking space.
+      const oldExports = await sql<{ path: string | null; store: Store | null }[]>`
+        delete from exports where created_at < now() - interval '7 days' returning path, store`;
+      for (const store of ["r2", "supabase"] as const)
+        await deleteFiles(oldExports.flatMap((x) => (x.path && (x.store ?? "supabase") === store ? [x.path] : [])), store);
       // Finished runs don't need their queue rows any more (saved leads are in "rows").
       await sql`
         with old as (select id from runs where status = 'done' and finished_at < now() - interval '3 days')

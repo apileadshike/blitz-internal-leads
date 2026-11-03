@@ -98,6 +98,18 @@ export async function savedPeople(limit: number, runId?: string): Promise<Rec[]>
 /** The rows of an uploaded list, in file order (at most `limit`). */
 export async function uploadRows(uploadId: string, limit: number): Promise<{ value: string; extra: Rec | null }[]> {
   const lim = Number.isFinite(limit) ? limit : 10_000_000;
+  // Lists put straight into R2 by the browser: one {"v","x"} JSON object per line.
+  const [up] = await sql<{ object_key: string | null }[]>`select object_key from uploads where id = ${uploadId}`;
+  if (up?.object_key) {
+    const { r2Lines } = await import("./storage");
+    const out: { value: string; extra: Rec | null }[] = [];
+    for await (const line of r2Lines(up.object_key)) {
+      const r = JSON.parse(line) as { v: string; x?: Rec };
+      out.push({ value: String(r.v), extra: r.x ?? null });
+      if (out.length >= lim) break;
+    }
+    return out;
+  }
   return sql<{ value: string; extra: Rec | null }[]>`
     select value, extra from upload_rows where upload_id = ${uploadId} order by idx limit ${lim}`;
 }

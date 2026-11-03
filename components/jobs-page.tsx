@@ -12,7 +12,7 @@ type Job = {
   failed: number; retries: number;
 };
 type Settings = { enabled: boolean; max_parallel: number; daily_budget: number };
-type JobsData = { jobs: Job[]; settings: Settings; spent_today: number; running: number; alerts: { at: string; level: string; text: string }[]; jobs_dir: string };
+type JobsData = { jobs: Job[]; settings: Settings; spent_today: number; running: number; alerts: { at: string; level: string; text: string }[]; jobs_dir: string; worker_seen?: string | null };
 
 const n = (v: number | null | undefined) => Number(v ?? 0).toLocaleString();
 function ago(iso: string | null) {
@@ -88,6 +88,14 @@ export function JobsPage() {
         <div className="muted">Today (UTC): {n(data.spent_today)} / {n(s.daily_budget)} records · {data.running} running{s.enabled ? "" : " · queue OFF"}</div>
       )} />
       <main className="single">
+        {data && data.worker_seen !== undefined && (!data.worker_seen || Date.now() - Date.parse(data.worker_seen) > 60_000) && (
+          <section className="panel">
+            <p className="error" style={{ fontSize: 14, margin: 0 }}>
+              ⚠ The worker is offline{data.worker_seen ? ` (last seen ${ago(data.worker_seen)})` : ""}. Jobs wait in the queue and continue as soon as it is back
+              (on the server: <code>pm2 status</code> / <code>pm2 restart blitz-worker</code>).
+            </p>
+          </section>
+        )}
         <section className="panel">
           <div className="row between">
             <h2>Queue</h2>

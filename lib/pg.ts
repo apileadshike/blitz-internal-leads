@@ -244,10 +244,13 @@ const SCHEMA = `
     extra jsonb,                         -- the file's other columns for this row
     primary key (upload_id, idx)
   );
+  -- With R2 set up, the browser puts the list straight into object storage (one NDJSON
+  -- file: {"v": value, "x": {other columns}} per line) and upload_rows stays empty.
+  alter table uploads add column if not exists object_key text;
   alter table uploads enable row level security;
   alter table upload_rows enable row level security;
 
-  -- Background exports: the file is written by a worker and kept in Supabase Storage.
+  -- Background exports: the file is written by a worker and kept in object storage (R2 or Supabase).
   create table if not exists exports (
     id text primary key,
     name text not null,
@@ -261,6 +264,7 @@ const SCHEMA = `
     created_at timestamptz not null default now(),
     finished_at timestamptz
   );
+  alter table exports add column if not exists store text;   -- r2 | supabase (null = supabase)
   alter table exports enable row level security;
 
   -- Alerts (job finished / failed / budget), shown on the Jobs page.

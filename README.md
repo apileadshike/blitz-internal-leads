@@ -61,33 +61,69 @@ Work is kept in Postgres, not in server memory, so any number of workers can sha
 - **Edits.** Changing budget, workers or repeat keeps progress. Changing steps or filters starts that job over.
 - **Pasted-list sources** (domains, URLs, emails) are read in one go; after that, their rows go through the queue like any other.
 
-## Deploy (Vercel + Trigger.dev + Supabase)
+## Deploy (Vercel + VPS worker + Supabase + R2)
 | Part | Where | How |
 |---|---|---|
-| Website (Next.js) | **Vercel** (Pro: commercial use, long downloads) | Import the GitHub repo |
-| Workers (`drain-queue`, `scheduler-tick`, `export-leads`) | **Trigger.dev** | `npm run trigger:deploy` |
-| Data, queue, uploads, exports | **Supabase** (Pro recommended: no pausing, backups) | Already set up; tables are created automatically |
+| Website (Next.js) | **Vercel** | Import the GitHub repo. Only reads and writes the database |
+| Worker: queue, scheduler, exports, cleanup (`scripts/worker.ts`) | **VPS** (any small Linux server, ~1 vCPU / 1–2 GB), run with **Bun** + **pm2** | See "Worker on a VPS" below |
+| Data, queue | **Supabase** (Pro recommended: no pausing, backups) | Already set up; tables are created automatically |
+| Files: imported lists, exports | **Cloudflare R2** (free up to 10 GB, no download fees) | See "Cloudflare R2" below. Without it, exports use Supabase Storage and imports go into the database |
 
-1. **Trigger.dev → Production → Environment variables:** `BLITZ_API_KEY`, `BLITZ_RPS=50`, `DATABASE_URL` (Supabase **session pooler**, port 5432), `SUPABASE_SECRET_KEY`. Then `npm run trigger:deploy`.
-2. **Vercel → Environment variables:** `DATABASE_URL` (Supabase **transaction pooler**, port 6543), `BLITZ_API_KEY`, `EXECUTION=trigger`, `TRIGGER_SECRET_KEY` (the `tr_prod_…` key), `APP_PASSWORD`, `SUPABASE_SECRET_KEY`, `JOB_FILES=off`, optional `ALERT_WEBHOOK_URL`.
-3. Deploy, open the URL (the browser asks for the app password), and run a free test (Saved people → ICP Fit) before real jobs.
+1. **Vercel → Environment variables:** `DATABASE_URL` (Supabase **transaction pooler**, port 6543), `BLITZ_API_KEY`, `EXECUTION=worker`, `SUPABASE_SECRET_KEY`, the four `R2_*` values, `JOB_FILES=off`, optional `ALERT_WEBHOOK_URL`. Remove `TRIGGER_SECRET_KEY`. Redeploy.
+2. **VPS:** set up the worker (below).
+3. Open the Jobs page: no "worker is offline" warning means the worker is checking in. Run a free test (Saved people → ICP Fit) before real jobs.
+
+### Worker on a VPS
+One always-on process does all background work. Everything it works on is in Supabase, so restarting it or the server loses nothing.
+```bash
+# once (Ubuntu): Node (for npm + pm2), Bun (runs the worker), git
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs git unzip
+curl -fsSL https://bun.sh/install | bash && source ~/.bashrc
+sudo npm install -g pm2
+
+git clone https://github.com/apileadshike/blitz-internal-leads.git blitz && cd blitz
+npm ci
+nano .env                       # settings below
+pm2 start ecosystem.config.cjs  # starts "blitz-worker"
+pm2 save && pm2 startup         # run the printed command: starts again after a reboot
+```
+`.env` on the VPS: `DATABASE_URL` (Supabase **session pooler**, port 5432), `BLITZ_API_KEY`, `BLITZ_RPS=50`, `SUPABASE_SECRET_KEY`, the four `R2_*` values. Leave `EXECUTION` empty there.
+
+Everyday commands: `pm2 logs blitz-worker` (what it is doing), `pm2 status`, `pm2 restart blitz-worker`.
+To update after a push: `git pull && npm ci && pm2 restart blitz-worker`.
+
+**Or on Render instead of a VPS:** Render dashboard → New → **Blueprint** → pick this repo. It reads `render.yaml` and creates a **Background Worker** from `Dockerfile.worker` (Bun). Fill in the same settings as the VPS `.env` when asked. Render restarts it and redeploys on every push, so pm2 isn't needed.
+
+The worker runs the same on Node (`npm run worker:node`) if Bun is ever a problem. Trigger.dev support is still in the code (`EXECUTION=trigger`, `src/trigger/`), switched off.
 
 What makes it work on serverless hosting:
 - **Live view** reconnects every ~40 s from where it left off (no repeats).
-- **Imports** are read in the browser and sent in small chunks to `uploads` (never over the 4.5 MB request limit).
+- **Imports** are read in the browser. With R2 they go straight from the browser to R2 in one request (never through the website); without it, in small chunks to `uploads` (never over the 4.5 MB request limit).
 - **Alerts** are stored in the database, so every machine sees them.
-- **Big downloads** (Leads page) are built by the `export-leads` task and stored in a private Supabase Storage bucket; you get a 1-hour download link.
+- **Big downloads** (Leads page) are built by the worker and stored in R2 (or a private Supabase Storage bucket); you get a 1-hour download link. Files older than 7 days are deleted.
 - **Database connections** stay small per instance (3 on Vercel).
 
 The `Dockerfile` still works for an always-on server instead (without `EXECUTION=trigger`, the server runs its own worker).
 
+## Cloudflare R2 (file storage)
+1. Cloudflare dashboard → **R2** → create a bucket (e.g. `blitz-leads`). R2 asks for a payment method once, even on the free tier.
+2. R2 → **Manage API tokens** → create a token with **Object Read & Write** on that bucket. Copy the Access Key ID, Secret Access Key and your Account ID.
+3. Bucket → **Settings → CORS policy** (so the browser may upload to it):
+   ```json
+   [{ "AllowedOrigins": ["https://YOUR-APP.vercel.app", "http://localhost:4000"],
+      "AllowedMethods": ["PUT"], "AllowedHeaders": ["content-type"], "MaxAgeSeconds": 3600 }]
+   ```
+4. Set `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` on **Vercel**, in the VPS worker's `.env`, and in your local `.env`.
+5. `/api/health` shows `"R2": "set"`. Older exports and imports keep working from where they were stored.
+
 ## Where things are
 - `lib/engine/`: the queue engine (`runs.ts` run state, hand-off and live view; `worker.ts` claiming, batches, paging, reaper; `boss.ts` pg-boss)
-- `scripts/worker.ts`: standalone worker (`npm run worker`)
+- `scripts/worker.ts`: the worker: queue, scheduler, exports, cleanup (`npm run worker`, Bun; `ecosystem.config.cjs` for pm2)
 - `lib/steps.ts`: every step (Blitz endpoints + custom tools)
 - `lib/jobs.ts`: job files, jobs table, scheduler
 - `lib/pg.ts`: Supabase Postgres connection + table definitions
 - `lib/db.ts`: leads, duplicate memory, "only new" memory (batched reads/writes)
+- `lib/storage.ts`: file storage (Cloudflare R2, or Supabase Storage)
 - `scripts/migrate-sqlite.mjs`: one-time copy of the old SQLite data into Supabase
 - `lib/runtime.ts`: the shared Blitz client, live runs and scheduler (one per server)
 - `instrumentation-node.ts`: starts the scheduler when the server starts

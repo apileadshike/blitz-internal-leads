@@ -1,10 +1,13 @@
 // Wakes the workers when new work lands in the queue.
 //
+//   EXECUTION=worker  → nothing to do: the always-on worker (`npm run worker`, on the VPS) polls the queue
 //   EXECUTION=trigger → start the Trigger.dev "drain-queue" task (src/trigger/queue.ts)
-//   otherwise         → nothing to do: the worker in the web server (or `npm run worker`) polls the queue
+//   not set           → nothing to do: the web server runs its own worker and scheduler
 import { tasks } from "@trigger.dev/sdk";
 
 export const usesTrigger = () => process.env.EXECUTION === "trigger";
+/** Background work runs somewhere else (a separate worker process or Trigger.dev), not in this web server. */
+export const workRunsElsewhere = () => process.env.EXECUTION === "worker" || usesTrigger();
 
 /** Start a drain task. Calls in the same 10 seconds share one task (idempotency key). */
 export async function kick(reason = "new work") {

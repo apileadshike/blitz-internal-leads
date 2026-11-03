@@ -17,6 +17,7 @@ export async function GET() {
     EXECUTION: process.env.EXECUTION ?? null,
     TRIGGER_SECRET_KEY: process.env.TRIGGER_SECRET_KEY ? process.env.TRIGGER_SECRET_KEY.slice(0, 7) + "…" : null, // tr_dev_ / tr_prod
     SUPABASE_SECRET_KEY: !!process.env.SUPABASE_SECRET_KEY,
+    R2: ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"].filter((k) => !process.env[k]).length ? "not set (exports use Supabase Storage)" : "set",
     JOB_FILES: process.env.JOB_FILES ?? null,
     on_vercel: !!process.env.VERCEL,
   };
@@ -26,7 +27,10 @@ export async function GET() {
   if (host && /^db\..*\.supabase\.co$/.test(host[1]) && process.env.VERCEL)
     hints.push("DATABASE_URL uses the direct db.*.supabase.co host, which Vercel often can't reach. Use the Transaction pooler string (…pooler.supabase.com:6543).");
   if (!process.env.BLITZ_API_KEY) hints.push("BLITZ_API_KEY is missing.");
+  const r2Missing = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"].filter((k) => !process.env[k]);
+  if (r2Missing.length && r2Missing.length < 4) hints.push(`R2 is half set up: missing ${r2Missing.join(", ")}.`);
   if (process.env.EXECUTION === "trigger" && !process.env.TRIGGER_SECRET_KEY) hints.push("EXECUTION=trigger but TRIGGER_SECRET_KEY is missing.");
+  if (process.env.VERCEL && !process.env.EXECUTION) hints.push("EXECUTION is not set: on Vercel set EXECUTION=worker (the VPS worker does the work).");
 
   let database: { ok: boolean; ms?: number; error?: string } = { ok: false };
   if (url) {

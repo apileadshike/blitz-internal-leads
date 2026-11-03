@@ -6,7 +6,7 @@
 import { runtime } from "./lib/runtime";
 import { JOBS_DIR } from "./lib/jobs";
 import { ensureSchema, sql } from "./lib/pg";
-import { usesTrigger } from "./lib/engine/kick";
+import { usesTrigger, workRunsElsewhere } from "./lib/engine/kick";
 
 const g = globalThis as unknown as { __started?: boolean };
 
@@ -19,6 +19,9 @@ if (!g.__started) {
     if (usesTrigger()) {
       // Trigger.dev runs the workers (drain-queue) and the scheduler (scheduler-tick cron).
       console.log("EXECUTION=trigger: queue work and scheduling run on Trigger.dev");
+    } else if (workRunsElsewhere()) {
+      // The always-on worker (`npm run worker`, e.g. on the VPS) runs the queue, scheduler and exports.
+      console.log("EXECUTION=worker: queue work, scheduling and exports run in the separate worker process");
     } else {
       if (process.env.RUN_WORKER !== "false") await rt.worker.start();
       await rt.scheduler.start();

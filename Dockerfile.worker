@@ -1,0 +1,12 @@
+# The worker only (queue, scheduler, exports, cleanup), run with Bun.
+# Used by Render (render.yaml) or any host that runs a container. The website stays on Vercel.
+FROM oven/bun:1.3-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+# Bun reads package-lock.json, so the same versions as npm are installed.
+RUN bun install --production
+COPY . .
+ENV NODE_ENV=production JOB_FILES=off
+# The host sends SIGTERM on redeploy: the worker finishes the batch in hand, unfinished rows return to the queue.
+STOPSIGNAL SIGTERM
+CMD ["bun", "scripts/worker.ts"]

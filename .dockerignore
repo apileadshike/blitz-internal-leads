@@ -5,3 +5,5 @@ jobs
 .git
 .next
 *.pdf
+.env.*
+!.env.example

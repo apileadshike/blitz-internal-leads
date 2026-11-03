@@ -6,16 +6,9 @@
 #   GitHub → repo → Settings → Secrets and variables → Actions → New repository secret
 name: Deploy Trigger.dev tasks
 
+# Turned off: the workers now run on the VPS (scripts/worker.ts, EXECUTION=worker).
+# Only runs when started by hand from the Actions tab, if Trigger.dev is used again.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "lib/**"
-      - "src/trigger/**"
-      - "trigger.config.ts"
-      - "package.json"
-      - "package-lock.json"
-      - "blitz-openapi.json"
   workflow_dispatch: # "Run workflow" button on the Actions tab
 
 concurrency:
