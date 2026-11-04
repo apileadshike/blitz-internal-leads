@@ -36,6 +36,8 @@ const worker = new Worker(new BlitzAPI({
   api_key: process.env.BLITZ_API_KEY,
   rate_limit_rps: Number(process.env.BLITZ_RPS ?? 10),
   max_retries: 4,
+  // Broad searches can take Blitz over a minute; the SDK default (30 s) cuts them off.
+  timeout: Number(process.env.BLITZ_TIMEOUT ?? 120),
 }));
 await worker.start();
 

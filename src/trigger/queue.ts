@@ -25,6 +25,7 @@ function blitz() {
     api_key: process.env.BLITZ_API_KEY,
     rate_limit_rps: Math.max(1, Math.floor(Number(process.env.BLITZ_RPS ?? 50) / DRAIN_TASKS)),
     max_retries: 4,
+    timeout: Number(process.env.BLITZ_TIMEOUT ?? 120),
   });
 }
 
