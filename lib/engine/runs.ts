@@ -116,8 +116,11 @@ const COUNTER_KEYS = ["received", "done", "out", "duplicates", "hits", "errors",
 
 /** Add to the per-step counters, one statement for all steps. */
 export async function bump(tx: ISql, runId: string, byStage: Map<number, Counters>) {
-  const stages = [...byStage.keys()];
+  const stages = [...byStage.keys()].sort((x, y) => x - y);
   if (!stages.length) return;
+  // Lock the counter rows in step order first: an UPDATE ... FROM locks in no fixed order,
+  // and two writers locking the same rows in different orders deadlock.
+  await tx`select 1 from run_stages where run_id = ${runId} and stage = any(${stages}::int[]) order by stage for update`;
   const col = (k: (typeof COUNTER_KEYS)[number]) => stages.map((s) => byStage.get(s)![k] ?? 0);
   await tx`
     update run_stages s set
@@ -143,9 +146,13 @@ export type Candidate = { item: Item; id?: string }; // id = existing queue row 
  * Items leave step `from`: duplicate check (if that step introduces a record type),
  * then on to the next step, or saved when it was the last step. Runs inside the
  * caller's transaction together with the rest of the batch.
+ *
+ * Returns how many rows were saved. It never touches the runs row: the caller updates
+ * it last in the transaction, so every transaction locks rows in the same order
+ * (queue rows, step counters, then the run) and parallel batches can't deadlock.
  */
-export async function handOff(tx: ISql, run: RunRow, from: number, cands: Candidate[], counters: Map<number, Counters>) {
-  if (!cands.length) return;
+export async function handOff(tx: ISql, run: RunRow, from: number, cands: Candidate[], counters: Map<number, Counters>): Promise<number> {
+  if (!cands.length) return 0;
   for (const c of cands) c.item.key ??= Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
   const def = stepDef(run, from);
   let keep = cands;
@@ -154,7 +161,8 @@ export async function handOff(tx: ISql, run: RunRow, from: number, cands: Candid
   const on = def.dedupeOn;
   if (on) {
     const keyed = cands.map((c) => ({ c, key: dedupeKey(c.item, on) }));
-    const keys = [...new Set(keyed.map((k) => k.key).filter((k): k is string => !!k))];
+    // Sorted: parallel batches then lock keys in the same order and can't deadlock each other.
+    const keys = [...new Set(keyed.map((k) => k.key).filter((k): k is string => !!k))].sort();
     // Claim keys for this run; a key someone already claimed is a duplicate (works across workers).
     const fresh = new Set(keys.length
       ? (await tx<{ key: string }[]>`
@@ -200,11 +208,11 @@ export async function handOff(tx: ISql, run: RunRow, from: number, cands: Candid
       ...(c.item.person?.person_linkedin_url ? [{ kind: "person", key: normUrl(String(c.item.person.person_linkedin_url)) }] : []),
       ...(c.item.company?.company_linkedin_url ? [{ kind: "company", key: normUrl(String(c.item.company.company_linkedin_url)) }] : []),
     ]);
+    marks.sort((a, b) => (a.kind + a.key < b.kind + b.key ? -1 : 1)); // same lock order in every batch
     await insertRows(tx, run.id, rows, marks, keep.map((c) => c.item.key ?? null));
     const ids = keep.filter((c) => c.id).map((c) => c.id!);
     if (ids.length) await tx`update items set status = ${ITEM.done}, lease_until = null, updated_at = now() where id = any(${ids}::bigint[])`;
-    if (rows.length) await tx`update runs set saved = saved + ${rows.length} where id = ${run.id}`;
-    return;
+    return rows.length;
   }
   for (const c of keep) delete c.item.rerun; // the duplicate check is skipped only once
   add(counters, next, { received: keep.length });
@@ -221,6 +229,7 @@ export async function handOff(tx: ISql, run: RunRow, from: number, cands: Candid
       insert into items (run_id, stage, status, data)
       select ${run.id}::text, ${next}::int, ${ITEM.ready}::smallint, d::jsonb from unnest(${born.map((c) => JSON.stringify(c.item))}::text[]) as t(d)`;
   }
+  return 0;
 }
 
 // ── live view ───────────────────────────────────────────────────────────────

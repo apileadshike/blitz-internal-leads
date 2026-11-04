@@ -67,7 +67,72 @@ export type StepDef = {
   noCache?: boolean;
   /** Cap workers for this step (e.g. Google Sheets can't take 20 writes at once). */
   maxConcurrency?: number;
+  /**
+   * Search sources only: filters a search can be split on, so several parts page at the same
+   * time (one cursor each). Every result must belong to exactly one value of the filter.
+   */
+  split?: SplitDim[];
 };
+
+/** A filter a search can be split on. `all`: values to split into when the filter is left empty. */
+export type SplitDim = { path: string[]; label: string; all?: readonly string[] };
+
+// Where each search keeps its splittable filters (see the Blitz request types).
+const COMPANY_SPLITS: SplitDim[] = [
+  // Every company has exactly one size band: all 8 bands together cover the whole search
+  // (checked against Blitz: the parts add up to the unsplit total, about 1% overlap).
+  { path: ["company", "employee_range"], label: "employee range", all: EMPLOYEE_RANGE },
+  { path: ["company", "hq", "country_code"], label: "HQ country" },
+  { path: ["company", "industry", "include"], label: "industry" },
+];
+const PEOPLE_SPLITS: SplitDim[] = [
+  ...COMPANY_SPLITS,
+  { path: ["people", "location", "country_code"], label: "person country" },
+  { path: ["people", "job_level"], label: "job level" },
+  { path: ["people", "job_function"], label: "job function" },
+];
+const JOB_SPLITS: SplitDim[] = [
+  { path: ["company", "size", "include"], label: "company size" },
+  { path: ["company", "hq", "country_code", "include"], label: "HQ country" },
+  { path: ["job", "location", "country_code", "include"], label: "job country" },
+  { path: ["company", "industry", "include"], label: "industry" },
+  { path: ["job", "seniority", "include"], label: "seniority" },
+];
+
+/** Most search parts paged at the same time for one run. */
+export const MAX_SPLITS = Math.max(1, Number(process.env.SEARCH_SPLITS ?? 8));
+
+/**
+ * Split a search into parts that don't overlap, so they can be paged at the same time.
+ * Uses the filter that gives the most parts: one the user filled with several values,
+ * or one left empty that has a known full list (employee range). One part = no split.
+ */
+export function splitSearch(def: StepDef, params: Rec, max = MAX_SPLITS): { label: string; params: Rec | null }[] {
+  const whole = [{ label: "", params: null }];
+  if (!def.split || max < 2) return whole;
+  let best: { dim: SplitDim; values: string[] } | undefined;
+  for (const dim of def.split) {
+    const cur = getPath(params, dim.path);
+    const values = Array.isArray(cur) && cur.length ? cur.map(String) : (cur == null || (Array.isArray(cur) && !cur.length)) && dim.all ? [...dim.all] : [];
+    if (values.length >= 2 && values.length > (best?.values.length ?? 1)) best = { dim, values };
+  }
+  if (!best) return whole;
+  // More values than parts: group them (e.g. 12 countries into 8 parts).
+  const n = Math.min(max, best.values.length);
+  const groups: string[][] = Array.from({ length: n }, () => []);
+  best.values.forEach((v, i) => groups[i % n].push(v));
+  return groups.map((g) => ({ label: `${best!.dim.label} ${g.join(", ")}`, params: setPath(structuredClone(params), best!.dim.path, g) }));
+}
+
+function getPath(o: unknown, path: string[]): unknown {
+  return path.reduce<unknown>((x, k) => (x && typeof x === "object" ? (x as Rec)[k] : undefined), o);
+}
+function setPath(o: Rec, path: string[], v: unknown): Rec {
+  let cur = o;
+  for (const k of path.slice(0, -1)) cur = (cur[k] && typeof cur[k] === "object" ? cur[k] : (cur[k] = {})) as Rec;
+  cur[path[path.length - 1]] = v;
+  return o;
+}
 
 // ── record builders ──────────────────────────────────────────────────────────
 type AnyObj = Record<string, any>; // API objects (SDK keeps unknown fields)
@@ -205,7 +270,7 @@ export const STEPS: StepDef[] = [
     id: "people_search", label: "Find People", endpoint: "POST /v2/search/people", group: "source",
     help: "People matching company + person filters across all companies. Fastest way to a lead list.",
     gives: ["person", "company"], dedupeOn: "person",
-    schemaPath: "/v2/search/people", omit: ["cursor", "max_results"],
+    schemaPath: "/v2/search/people", omit: ["cursor", "max_results"], split: PEOPLE_SPLITS,
     async *source(params, ctx) {
       for await (const p of cursorPaged((q) => ctx.client.search.people(q as any), params, ctx)) yield personItem(p);
     },
@@ -214,7 +279,7 @@ export const STEPS: StepDef[] = [
     id: "company_search", label: "Company Search", endpoint: "POST /v2/search/companies", group: "source",
     help: "Companies matching firmographic filters (industry, size, HQ, funding, tech, traffic…).",
     gives: ["company"], dedupeOn: "company",
-    schemaPath: "/v2/search/companies", omit: ["cursor", "max_results"],
+    schemaPath: "/v2/search/companies", omit: ["cursor", "max_results"], split: COMPANY_SPLITS,
     async *source(params, ctx) {
       for await (const c of cursorPaged((q) => ctx.client.search.companies(q as any), params, ctx)) yield { company: companyRec(c), extra: {} };
     },
@@ -223,7 +288,7 @@ export const STEPS: StepDef[] = [
     id: "tam_by_jobs", label: "TAM by Jobs (hiring companies)", endpoint: "POST /v2/company/tam-by-jobs", group: "source",
     help: "Companies currently hiring for the roles you describe. A hiring signal.",
     gives: ["company"], dedupeOn: "company",
-    schemaPath: "/v2/company/tam-by-jobs", omit: ["cursor", "max_results"],
+    schemaPath: "/v2/company/tam-by-jobs", omit: ["cursor", "max_results"], split: JOB_SPLITS,
     async *source(params, ctx) {
       for await (const r of cursorPaged((q) => ctx.client.company.tam_by_jobs(q as any), params, ctx))
         yield { company: companyRec(r.company), extra: { matched_jobs: r.matched_jobs } };
@@ -233,7 +298,7 @@ export const STEPS: StepDef[] = [
     id: "tam_by_people", label: "TAM by People (companies by persona)", endpoint: "POST /v2/company/tam-by-people", group: "source",
     help: "Companies where people matching your persona filters work.",
     gives: ["company"], dedupeOn: "company",
-    schemaPath: "/v2/company/tam-by-people", omit: ["cursor", "max_results"],
+    schemaPath: "/v2/company/tam-by-people", omit: ["cursor", "max_results"], split: PEOPLE_SPLITS,
     async *source(params, ctx) {
       for await (const r of cursorPaged((q) => ctx.client.company.tam_by_people(q as any), params, ctx))
         yield { company: companyRec(r.company), extra: { matched_people: r.matched_people } };
@@ -243,7 +308,7 @@ export const STEPS: StepDef[] = [
     id: "jobs_search", label: "Search Jobs", endpoint: "POST /v2/jobs/search", group: "source",
     help: "Live job postings across companies. Duplicate check keeps one row per hiring company.",
     gives: ["job", "company"], dedupeOn: "company",
-    schemaPath: "/v2/jobs/search", omit: ["cursor", "max_results"],
+    schemaPath: "/v2/jobs/search", omit: ["cursor", "max_results"], split: JOB_SPLITS,
     async *source(params, ctx) {
       for await (const j of cursorPaged((q) => ctx.client.jobs.search(q as any), params, ctx))
         yield { job: jobRec(j), company: { company_name: j.company_name, company_linkedin_url: j.company_linkedin_url }, extra: {} };

@@ -141,6 +141,22 @@ const SCHEMA = `
   );
   -- Search paging is claimed like items: one worker at a time per run, with a lease.
   alter table runs add column if not exists source_lease_until timestamptz;
+  -- A search split into parts that page at the same time (e.g. one per employee range).
+  -- Each part has its own cursor and lease; the run's source_* columns hold the totals.
+  create table if not exists run_sources (
+    run_id text not null,
+    shard integer not null,
+    label text not null default '',
+    params jsonb,                       -- the part's filters (null = the step's own settings)
+    cursor text,
+    pages integer not null default 0,
+    count integer not null default 0,
+    exhausted boolean not null default false,
+    lease_until timestamptz,
+    primary key (run_id, shard)
+  );
+  -- Results being fetched right now (all parts), so parallel parts never overshoot a limit or budget.
+  alter table runs add column if not exists source_reserved integer not null default 0;
   create index if not exists runs_active on runs (status) where status in ('running', 'draining');
   create index if not exists runs_job on runs (job_id, created_at);
 
@@ -311,6 +327,7 @@ const SCHEMA = `
   alter table items enable row level security;
   alter table run_seen enable row level security;
   alter table run_logs enable row level security;
+  alter table run_sources enable row level security;
 
   -- Keep these tables private: no access through Supabase's public API keys.
   alter table rows enable row level security;

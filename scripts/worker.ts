@@ -24,8 +24,29 @@ import { runExport } from "../lib/exports";
 import { describeError } from "../lib/engine/common";
 
 try { process.loadEnvFile?.(".env"); } catch { /* Bun loads .env itself; on a host the env is set */ }
+// The worker should use Supabase's SESSION pooler (port 5432): its many parallel queries stall on
+// the transaction pooler (6543). WORKER_DATABASE_URL lets it differ from the website's DATABASE_URL.
+if (process.env.WORKER_DATABASE_URL) process.env.DATABASE_URL = process.env.WORKER_DATABASE_URL;
+// The session pooler allows 15 connections in total: leave room for the website.
+process.env.DB_POOL_SIZE ??= "8";
+if (/:6543\//.test(process.env.DATABASE_URL ?? "")) {
+  console.warn("[worker] DATABASE_URL is the transaction pooler (port 6543). Use the session pooler (port 5432) for the worker, e.g. in WORKER_DATABASE_URL.");
+}
 if (!process.env.BLITZ_API_KEY) throw new Error("Missing BLITZ_API_KEY");
 if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
+
+// A dropped database connection must not kill the worker: the database library reconnects on the
+// next query, and rows held at that moment return to the queue when their lease runs out.
+// (Under Bun the library can throw from its own error handler when the pooler closes connections.)
+let crashes: number[] = [];
+const survive = (kind: string) => (e: unknown) => {
+  console.error(`[worker] ${kind}:`, describeError(e));
+  // Many in a short time means something is really broken: exit and let the host restart it.
+  crashes = [...crashes.filter((t) => Date.now() - t < 60_000), Date.now()];
+  if (crashes.length > 50) { console.error("[worker] too many errors in a minute, restarting"); process.exit(1); }
+};
+process.on("uncaughtException", survive("uncaught error"));
+process.on("unhandledRejection", survive("unhandled error"));
 
 const runtime = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined" ? "Bun" : "Node";
 console.log(`[worker] ${runtime} on ${hostname()}, starting…`);
