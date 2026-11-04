@@ -10,6 +10,7 @@
     "db:migrate-sqlite": "node scripts/migrate-sqlite.mjs",
     "worker": "bun scripts/worker.ts",
     "worker:node": "tsx scripts/worker.ts",
+    "check:r2": "bun scripts/check-r2.ts",
     "trigger:dev": "trigger dev",
     "trigger:deploy": "trigger deploy"
   },

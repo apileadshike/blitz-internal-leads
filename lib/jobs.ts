@@ -195,7 +195,23 @@ export async function jobRunIds(id: number): Promise<string[]> {
 }
 
 // ── scheduler ───────────────────────────────────────────────────────────────
+/**
+ * Only one scheduler ticks at a time across every process (the website and any worker):
+ * a lease in the settings table, renewed by whoever holds it, free again 60 s after its
+ * holder stops. Without it two processes can start the same job twice.
+ */
+async function takeSchedulerLease(owner: string): Promise<boolean> {
+  const value = `${owner}|${new Date(Date.now() + 60_000).toISOString()}`;
+  const got = await sql`
+    insert into settings (key, value) values ('scheduler_lease', ${value})
+    on conflict (key) do update set value = excluded.value
+    where split_part(settings.value, '|', 1) = ${owner} or split_part(settings.value, '|', 2)::timestamptz < now()
+    returning key`;
+  return got.length > 0;
+}
+
 export class Scheduler {
+  private readonly owner = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   private timer?: NodeJS.Timeout;
   private shuttingDown = false;
   private budgetAlertDay = "";
@@ -283,6 +299,7 @@ export class Scheduler {
     if (this.ticking) { this.tickAgain = true; return; }
     this.ticking = true;
     try {
+      if (!(await takeSchedulerLease(this.owner))) return; // another process is the scheduler right now
       if (this.filesChanged || Date.now() - this.filesAt > 60_000) {
         this.filesChanged = false;
         this.filesAt = Date.now();
@@ -333,6 +350,18 @@ export class Scheduler {
       alert("error", `${job.name} failed: ${invalid}`);
       return invalid;
     }
+    // Claim the job in one statement: if two processes try to start it at once, only one wins.
+    const [claimed] = await sql`update jobs set status = 'running' where id = ${job.id} and status <> 'running' returning id`;
+    if (!claimed) return "Already running";
+    try {
+      return await this.launchClaimed(job, manual);
+    } catch (e) {
+      await patch(job.id, { status: job.status, note: `Could not start: ${(e as Error).message}` });
+      throw e;
+    }
+  }
+
+  private async launchClaimed(job: JobRow, manual: boolean): Promise<string | void> {
     const st = settingsOf(job);
     const prev = job.run_id ? await getRunLight(job.run_id) : undefined;
     // A stopped run of this cycle continues where it left off; nothing is fetched twice.

@@ -1,0 +1,26 @@
+# systemd service for the worker on a VPS (Bun only, no Node or pm2 needed).
+# Install:  sudo cp deploy/blitz-worker.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#           sudo systemctl enable --now blitz-worker
+# Logs:     journalctl -u blitz-worker -f
+# Assumes user "blitz" with the code in /home/blitz/blitz and Bun in /home/blitz/.bun.
+[Unit]
+Description=Blitz lead engine worker (queue, scheduler, exports)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=blitz
+WorkingDirectory=/home/blitz/blitz
+ExecStart=/home/blitz/.bun/bin/bun scripts/worker.ts
+Environment=NODE_ENV=production
+Environment=JOB_FILES=off
+Restart=always
+RestartSec=5
+# On stop/restart: SIGTERM, then up to 30 s to finish the batch in hand.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Keep it from ever crowding out the other apps on this server.
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target

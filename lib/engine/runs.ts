@@ -180,6 +180,13 @@ export async function handOff(tx: ISql, run: RunRow, from: number, cands: Candid
       }
     }
     add(counters, from, { duplicates: dups });
+    // Say why: otherwise a run that only finds known leads just ends with "0 rows saved".
+    const known = keyed.filter(({ c, key }) => !c.item.rerun && key && old.has(key)).length;
+    if (known) {
+      const what = on === "person" ? "people" : "companies";
+      await addLogs(tx, run.id, [{ stage: def.label, message:
+        `${known} ${what} skipped: already saved by an earlier run ("Only new ${what}" is on; turn it off in the job to get them again)` }]);
+    }
   }
   add(counters, from, { out: keep.length });
   if (dropIds.length) await tx`update items set status = ${ITEM.dropped}, lease_until = null, updated_at = now() where id = any(${dropIds}::bigint[])`;

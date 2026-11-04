@@ -92,6 +92,8 @@ pm2 save && pm2 startup         # run the printed command: starts again after a 
 Everyday commands: `pm2 logs blitz-worker` (what it is doing), `pm2 status`, `pm2 restart blitz-worker`.
 To update after a push: `git pull && npm ci && pm2 restart blitz-worker`.
 
+**VPS that already runs other apps:** don't touch its Node; use Bun + systemd instead of pm2 (`deploy/blitz-worker.service`, steps in the file).
+
 **Or on Render instead of a VPS:** Render dashboard → New → **Blueprint** → pick this repo. It reads `render.yaml` and creates a **Background Worker** from `Dockerfile.worker` (Bun). Fill in the same settings as the VPS `.env` when asked. Render restarts it and redeploys on every push, so pm2 isn't needed.
 
 The worker runs the same on Node (`npm run worker:node`) if Bun is ever a problem. Trigger.dev support is still in the code (`EXECUTION=trigger`, `src/trigger/`), switched off.
