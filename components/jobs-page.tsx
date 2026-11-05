@@ -41,12 +41,34 @@ const OPTIMISTIC: Record<string, (j: Job) => Partial<Job> | null> = {
   delete: () => null,
 };
 
+/** Above this many leads a job's download is built in the background (a streamed one would time out). */
+const BIG_EXPORT = 50_000;
+
 export function JobsPage() {
   const [data, setData] = useState<JobsData | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [order, setOrder] = useState<Job[] | null>(null); // local order while dragging
   const [busy, setBusy] = useState<string | null>(null);
   const dragging = useRef<number | null>(null);
+  // Big jobs: the file is built in the background by the worker (stored in R2), because a
+  // streamed download is cut off after 5 minutes on Vercel. One entry per job id.
+  type Exp = { status: string; rows?: number | null; url?: string | null; error?: string | null };
+  const [exps, setExps] = useState<Record<number, Exp>>({});
+  async function exportJob(job: Job, fmt: "csv" | "xlsx") {
+    const set = (e: Exp) => setExps((m) => ({ ...m, [job.id]: e }));
+    set({ status: "queued" });
+    const r = await fetch(`/api/exports?job=${job.id}&fmt=${fmt}&name=${encodeURIComponent(job.name)}`, { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return set({ status: "failed", error: j.error ?? `HTTP ${r.status}` });
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 2000));
+      const st = await (await fetch(`/api/exports/${j.id}`)).json().catch(() => null);
+      if (!st) continue;
+      set(st);
+      if (st.status === "done") { window.location.href = st.url; break; }
+      if (st.status === "failed") break;
+    }
+  }
 
   // Bumped by every button click: a refresh that started before the click is thrown away,
   // so it can't undo the change the click just showed.
@@ -231,9 +253,22 @@ export function JobsPage() {
                   {j.live && j.run_id && <a className="btn secondary small" href={`/#run=${j.run_id}`} target="_blank">Watch live</a>}
                   {j.rows > 0 && (
                     <div className="dl">
-                      <a className="btn ghost small" href={`/api/jobs/${j.id}/rows?fmt=csv`}>CSV</a>
-                      <a className="btn ghost small" href={`/api/jobs/${j.id}/rows?fmt=xlsx`}>Excel</a>
+                      {(["csv", "xlsx"] as const).map((fmt) => j.rows > BIG_EXPORT ? (
+                        <button key={fmt} type="button" className="ghost small" disabled={exps[j.id]?.status === "queued" || exps[j.id]?.status === "running"}
+                          onClick={() => void exportJob(j, fmt)} title="Large job: the file is built in the background, then downloads by itself">
+                          {fmt === "csv" ? "CSV" : "Excel"}
+                        </button>
+                      ) : (
+                        <a key={fmt} className="btn ghost small" href={`/api/jobs/${j.id}/rows?fmt=${fmt}`}>{fmt === "csv" ? "CSV" : "Excel"}</a>
+                      ))}
                     </div>
+                  )}
+                  {exps[j.id] && (
+                    <span className={exps[j.id].status === "failed" ? "error" : "muted"}>
+                      {exps[j.id].status === "failed" ? `Export failed: ${exps[j.id].error}`
+                        : exps[j.id].status === "done" ? <a href={exps[j.id].url ?? "#"}>File ready</a>
+                        : `Preparing file${exps[j.id].rows ? `: ${Number(exps[j.id].rows).toLocaleString()} rows` : ""}…`}
+                    </span>
                   )}
                   {btn("delete", "Delete", "link")}
                 </div>
