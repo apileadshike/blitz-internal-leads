@@ -12,7 +12,10 @@ export function Header({ active, right }: { active: Page; right?: React.ReactNod
   return (
     <header>
       <h1>
-        Blitz Lead Engine
+        <Link href="/" className="brand">
+          <span className="logo">B</span>
+          Blitz Lead Engine
+        </Link>
         <nav>
           {LINKS.map(([id, href, label]) => (
             <Link key={id} href={href} className={active === id ? "on" : undefined}>{label}</Link>

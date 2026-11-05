@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Header } from "./header";
+import { dialog } from "./dialog";
 
 type Job = {
   id: number; name: string; file: string; status: string; position: number;
@@ -47,11 +48,18 @@ export function JobsPage() {
   }, [load]);
 
   const act = async (job: Job, action: string) => {
-    if (action === "delete" && !confirm("Delete this job? Its file moves to jobs/_deleted/ (split files: all parts). Rows already saved stay in the database.")) return;
-    if (action === "restart" && !confirm("Start this job over from the first page? Results bought again cost records again (people already saved are skipped if 'skip seen people' is on).")) return;
+    if (action === "delete" && !(await dialog.confirm({
+      title: `Delete "${job.name}"?`, message: "The job is removed from the queue. Leads it already saved stay in your database.",
+      confirmLabel: "Delete job", danger: true,
+    }))) return;
+    if (action === "restart" && !(await dialog.confirm({
+      title: `Start "${job.name}" over?`,
+      message: "It begins again from the first page. Results bought again cost records again (people already saved are skipped if Skip people already in my database is on).",
+      confirmLabel: "Start over",
+    }))) return;
     setBusy(`${job.id}:${action}`);
     const r = await post(`/api/jobs/${job.id}/${action}`);
-    if (!r.ok) alert((await r.json()).error);
+    if (!r.ok) void dialog.alert("That didn't work", (await r.json()).error);
     setBusy(null);
     load();
   };
@@ -82,129 +90,132 @@ export function JobsPage() {
   };
 
   const s = data?.settings;
+  const offline = !!data && data.worker_seen !== undefined && (!data.worker_seen || Date.now() - Date.parse(data.worker_seen) > 60_000);
+  const spentPct = s ? Math.min(100, (100 * (data?.spent_today ?? 0)) / s.daily_budget) : 0;
   return (
     <>
       <Header active="jobs" right={s && data && (
-        <div className="muted">Today (UTC): {n(data.spent_today)} / {n(s.daily_budget)} records · {data.running} running{s.enabled ? "" : " · queue OFF"}</div>
+        <div className="stat-chips">
+          <span className="stat-chip">{offline ? <span className="dead" /> : <span className="live" />}Worker {offline ? "offline" : "online"}</span>
+          <span className="stat-chip"><b>{data.running}</b> running</span>
+        </div>
       )} />
       <main className="single">
-        {data && data.worker_seen !== undefined && (!data.worker_seen || Date.now() - Date.parse(data.worker_seen) > 60_000) && (
-          <section className="panel">
-            <p className="error" style={{ fontSize: 14, margin: 0 }}>
-              ⚠ The worker is offline{data.worker_seen ? ` (last seen ${ago(data.worker_seen)})` : ""}. Jobs wait in the queue and continue as soon as it is back
-              (on the server: <code>pm2 status</code> / <code>pm2 restart blitz-worker</code>).
-            </p>
-          </section>
+        <div className="page-head">
+          <div>
+            <h2>Jobs</h2>
+            <p>Background pipelines. They run top to bottom, keep going when this page is closed, and stop at their record budget.</p>
+          </div>
+          {settings && (
+            <label className="switch inline-switch">
+              <input type="checkbox" checked={settings.enabled} onChange={(e) => saveSettings({ ...settings, enabled: e.target.checked })} />
+              <span>Queue {settings.enabled ? "on" : "off"}</span>
+            </label>
+          )}
+        </div>
+
+        {offline && (
+          <div className="banner warn">
+            <b>The worker is offline</b>{data?.worker_seen ? ` (last seen ${ago(data.worker_seen)})` : ""}. Jobs wait in the queue and continue as soon as it is back.
+          </div>
         )}
-        <section className="panel">
-          <div className="row between">
-            <h2>Queue</h2>
+
+        <section className="metrics big-metrics">
+          <div className="metric">
+            <span>Spent today (UTC)</span>
+            <b>{n(data?.spent_today)}</b>
+            <small>of {n(s?.daily_budget)} daily records</small>
+            <div className="budget-bar"><div style={{ width: spentPct + "%" }} /></div>
+          </div>
+          <div className="metric"><span>Running now</span><b>{n(data?.running)}</b><small>up to {n(s?.max_parallel)} at the same time</small></div>
+          <div className="metric"><span>Jobs</span><b>{n(data?.jobs.length)}</b><small>{n(data?.jobs.filter((j) => j.status === "waiting").length)} waiting</small></div>
+          <div className="metric">
+            <span>Queue settings</span>
             {settings && (
-              <div className="queue-settings">
-                <label className="inline"><input type="checkbox" checked={settings.enabled} onChange={(e) => saveSettings({ ...settings, enabled: e.target.checked })} /> Queue on</label>
-                <label>Jobs at the same time
+              <div className="metric-inputs">
+                <label>Parallel jobs
                   <input type="number" min={1} max={10} defaultValue={settings.max_parallel} onBlur={(e) => saveSettings({ ...settings, max_parallel: Number(e.target.value) })} />
                 </label>
-                <label>Daily record budget
+                <label>Daily budget
                   <input type="number" min={1} defaultValue={settings.daily_budget} onBlur={(e) => saveSettings({ ...settings, daily_budget: Number(e.target.value) })} />
                 </label>
               </div>
             )}
           </div>
-          <div className="budget-bar"><div style={{ width: s ? Math.min(100, (100 * (data?.spent_today ?? 0)) / s.daily_budget) + "%" : 0 }} /></div>
-          <p className="hint">
-            Jobs run top to bottom. Drag rows to reorder. Each job keeps going until its search has no more results, then the next one starts.
-            Drop a <code>.json</code> file into the <code>{data?.jobs_dir ?? "jobs"}/</code> folder, or use <b>Save as job</b> in the builder.
-          </p>
-          <div className="table-wrap">
-            <table className="jobs">
-              <thead><tr><th></th><th>Job</th><th>Status</th><th>Progress</th><th>Records</th><th>Last activity</th><th>Actions</th></tr></thead>
-              <tbody>
-                {!data ? (
-                  <tr className="empty"><td colSpan={7}>Loading…</td></tr>
-                ) : jobs.length === 0 ? (
-                  <tr className="empty"><td colSpan={7}>No jobs yet. Build a pipeline and press <b>Save as job</b>, or drop a file into the jobs folder.</td></tr>
-                ) : jobs.map((j, i) => {
-                  const status = j.live && j.stopping ? "stopping" : j.status;
-                  const due = j.status === "waiting" && j.next_run_at && new Date(j.next_run_at) > new Date() ? `next run ${ago(j.next_run_at)}` : "";
-                  const pct = j.record_budget ? Math.min(100, (100 * j.records) / j.record_budget) : 0;
-                  const btn = (action: string, label: string, cls = "secondary small") => (
-                    <button className={cls} disabled={busy === `${j.id}:${action}`} onClick={() => act(j, action)}>{label}</button>
-                  );
-                  return (
-                    <tr key={j.id} draggable className={dragging.current === j.id ? "dragging" : undefined}
-                      onDragStart={() => { dragging.current = j.id; }} onDragOver={(e) => onDragOver(e, j.id)} onDragEnd={onDragEnd}>
-                      <td className="grip" title="Drag to reorder">⋮⋮ {i + 1}</td>
-                      <td>
-                        <b>{j.name}</b>
-                        <div className="muted">{j.file} · {j.steps.join(" → ")}{j.max_results ? ` · max ${j.max_results.toLocaleString()} results` : " · all results"}{j.repeat_every_hours ? ` · repeats every ${j.repeat_every_hours}h` : ""}</div>
-                      </td>
-                      <td><span className={"pill " + status}>{status}</span>{due && <div className="muted">{due}</div>}</td>
-                      <td>
-                        {n(j.pages)} pages · {n(j.rows)} rows
-                        <div className="muted">{n(j.batches)} batches{j.cycles ? ` · ${j.cycles} cycles` : ""}{j.search_done ? " · search fully read" : ""}</div>
-                      </td>
-                      <td>
-                        {n(j.records)}{j.record_budget ? ` / ${n(j.record_budget)}` : ""}
-                        <div className="mini-bar"><div style={{ width: pct + "%" }} /></div>
-                        {j.records_total !== j.records && <div className="muted">{n(j.records_total)} all time</div>}
-                      </td>
-                      <td>
-                        {j.error ? <span className="error">{j.error}</span> : j.note}
-                        {j.failed > 0 && <div className="error">{j.failed} lead(s) with a failed step</div>}
-                        <div className="muted">{j.live ? "started " + ago(j.started_at) : j.finished_at ? "finished " + ago(j.finished_at) : ""}</div>
-                      </td>
-                      <td className="job-actions">
-                        {!j.live && btn("run", "▶ Run now", "small")}
-                        {j.live && !j.stopping && btn("pause", "Pause")}
-                        {!j.live && j.status === "waiting" && btn("pause", "Pause")}
-                        {j.status === "paused" && btn("resume", "Resume")}
-                        {j.status === "failed" && btn("retry", "Retry")}
-                        {!j.live && j.failed > 0 && btn("rerun", `↻ Re-run failed (${j.failed})`)}
-                        {!j.live && (j.has_progress || j.search_done) && btn("restart", "Start over")}
-                        {j.live && j.run_id && <a className="btn secondary small" href={`/#run=${j.run_id}`} target="_blank">Watch</a>}
-                        {j.rows > 0 && (
-                          <>
-                            <a className="btn secondary small" href={`/api/jobs/${j.id}/rows?fmt=csv`}>CSV</a>
-                            <a className="btn secondary small" href={`/api/jobs/${j.id}/rows?fmt=xlsx`}>Excel</a>
-                          </>
-                        )}
-                        {btn("delete", "Delete", "link")}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+        </section>
+
+        <section className="job-list">
+          {!data ? (
+            <div className="empty-state"><b>Loading jobs…</b></div>
+          ) : jobs.length === 0 ? (
+            <div className="empty-state"><b>No jobs yet</b>Build a pipeline in the builder and press Create job.</div>
+          ) : jobs.map((j, i) => {
+            const status = j.live && j.stopping ? "stopping" : j.status;
+            const due = j.status === "waiting" && j.next_run_at && new Date(j.next_run_at) > new Date() ? `next run ${ago(j.next_run_at)}` : "";
+            const pct = j.record_budget ? Math.min(100, (100 * j.records) / j.record_budget) : 0;
+            const btn = (action: string, label: string, cls = "secondary small") => (
+              <button className={cls} disabled={busy === `${j.id}:${action}`} onClick={() => act(j, action)}>{label}</button>
+            );
+            return (
+              <article key={j.id} draggable className={"job-card " + status + (dragging.current === j.id ? " dragging" : "")}
+                onDragStart={() => { dragging.current = j.id; }} onDragOver={(e) => onDragOver(e, j.id)} onDragEnd={onDragEnd}>
+                <div className="job-grip" title="Drag to reorder">{i + 1}</div>
+                <div className="job-main">
+                  <div className="job-title">
+                    <b>{j.name}</b>
+                    <span className={"pill " + status}>{j.live && !j.stopping && <span className="pulse-dot" />}{status}</span>
+                    {due && <span className="muted">{due}</span>}
+                  </div>
+                  <div className="job-steps">
+                    {j.steps.map((st, k) => <span key={k} className="step-chip">{st}</span>)}
+                    <span className="muted">{j.max_results ? `max ${j.max_results.toLocaleString()} results` : "all results"}{j.repeat_every_hours ? ` · repeats every ${j.repeat_every_hours}h` : ""}</span>
+                  </div>
+                  <div className="job-stats">
+                    <div><span>Leads</span><b>{n(j.rows)}</b></div>
+                    <div><span>Pages</span><b>{n(j.pages)}</b></div>
+                    <div className="job-budget">
+                      <span>Records{j.record_budget ? ` · ${Math.round(pct)}% of budget` : ""}</span>
+                      <b>{n(j.records)}{j.record_budget ? <small> / {n(j.record_budget)}</small> : null}</b>
+                      {j.record_budget ? <div className="budget-bar"><div style={{ width: pct + "%" }} /></div> : null}
+                    </div>
+                    <div><span>{j.live ? "Started" : j.finished_at ? "Finished" : "Activity"}</span><b className="soft">{j.live ? ago(j.started_at) : j.finished_at ? ago(j.finished_at) : "–"}</b></div>
+                  </div>
+                  {(j.error || j.note || j.failed > 0) && (
+                    <div className={"job-note" + (j.error ? " err" : "")}>
+                      {j.error ?? j.note}
+                      {j.failed > 0 && <>{j.error || j.note ? " · " : ""}{j.failed} lead(s) with a failed step</>}
+                    </div>
+                  )}
+                </div>
+                <div className="job-actions">
+                  {!j.live && btn("run", "Run now", "small")}
+                  {j.live && !j.stopping && btn("pause", "Pause")}
+                  {!j.live && j.status === "waiting" && btn("pause", "Pause")}
+                  {j.status === "paused" && btn("resume", "Resume")}
+                  {j.status === "failed" && btn("retry", "Retry")}
+                  {!j.live && j.failed > 0 && btn("rerun", `Re-run failed (${j.failed})`)}
+                  {!j.live && (j.has_progress || j.search_done) && btn("restart", "Start over")}
+                  {j.live && j.run_id && <a className="btn secondary small" href={`/#run=${j.run_id}`} target="_blank">Watch live</a>}
+                  {j.rows > 0 && (
+                    <div className="dl">
+                      <a className="btn ghost small" href={`/api/jobs/${j.id}/rows?fmt=csv`}>CSV</a>
+                      <a className="btn ghost small" href={`/api/jobs/${j.id}/rows?fmt=xlsx`}>Excel</a>
+                    </div>
+                  )}
+                  {btn("delete", "Delete", "link")}
+                </div>
+              </article>
+            );
+          })}
         </section>
 
         <section className="panel">
-          <h2>Alerts</h2>
+          <div className="panel-h"><h2>Alerts</h2></div>
           <ol className="alerts">
             {data?.alerts.length
               ? data.alerts.map((a, i) => <li key={i} className={a.level}><span className="muted">{ago(a.at)}</span> {a.text}</li>)
               : <li className="muted">Nothing yet.</li>}
           </ol>
-          <details>
-            <summary>Job file format</summary>
-            <pre>{`{
-  "name": "SaaS founders US",
-  "steps": [ { "step": "people_search", "params": { … filters … } }, { "step": "find_email" } ],
-  "batch_size": 1000,          // search results per batch (progress is saved after every page)
-  "record_budget": 5000,       // max records this job may spend (per cycle)
-  "workers": 20,
-  "skip_seen_people": true,
-  "skip_seen_companies": false,
-  "repeat_every_hours": 24,    // optional: run again after finishing (pair with "Only new since last run")
-  "split": {                   // optional: one job per value, for filters over 50,000 results
-    "field": "company.hq.country_code",
-    "values": ["US", "GB", "DE"]
-  }
-}`}</pre>
-            <p className="hint">Easiest way to get the steps right: build the pipeline in the builder and press <b>Save as job</b>, then edit the file.
-              Changing budget, workers or repeat keeps progress. Changing steps or filters starts the job over.</p>
-          </details>
         </section>
       </main>
     </>

@@ -28,7 +28,11 @@ export type StageStats = {
   filtered: number; // rows this step removed on purpose (e.g. ICP misfit, not new)
   cached: number; // lookups answered from the cache (free)
 };
-export type RunStats = { stages: StageStats[]; saved: number; records_used: number; max_records: number; failed?: number };
+export type RunStats = {
+  stages: StageStats[]; saved: number; records_used: number; max_records: number; failed?: number;
+  /** For speed, ETA and the finished summary in the live view. */
+  status?: string; elapsed?: number; max_items?: number; source_count?: number; source_done?: boolean;
+};
 
 /** Events the live view understands (same shape as before the queue rewrite). */
 export type RunEvent =

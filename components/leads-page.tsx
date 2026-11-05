@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Header } from "./header";
 import { humanize } from "./schema-form";
+import { IconDownload, IconSearch } from "./icons";
 
 type Row = Record<string, any>;
 const COLS = ["full_name", "job_title", "email", "phone", "company_name", "company_domain", "country",
@@ -67,72 +68,103 @@ export function LeadsPage() {
   }, [data]);
   const resetPage = <T,>(fn: (v: T) => void) => (v: T) => { fn(v); setPage(1); };
 
+  // Name + title and company + domain are shown together; the other columns follow.
+  const extra = cols.filter((c) => !["full_name", "job_title", "company_name", "company_domain", "email", "phone", "person_linkedin_url", "company_linkedin_url", "saved_at"].includes(c));
+  const busyExport = exp?.status === "queued" || exp?.status === "running";
+
   return (
     <>
-      <Header active="leads" right={<div className="muted">{countText}</div>} />
+      <Header active="leads" right={<div className="stat-chips"><span className="stat-chip">{data ? <><b>{data.total.toLocaleString()}{data.exact ? "" : "+"}</b> leads match</> : "Loading…"}</span></div>} />
       <main className="single">
+        <div className="page-head">
+          <div>
+            <h2>Leads</h2>
+            <p>Every lead saved by your runs and jobs. Downloads include all matching leads, not just this page.</p>
+          </div>
+          <div className="toolbar">
+            {data?.backgroundExports ? (
+              <>
+                <button type="button" className="secondary" disabled={busyExport} onClick={() => void backgroundExport("csv")}><IconDownload /> CSV</button>
+                <button type="button" disabled={busyExport} onClick={() => void backgroundExport("xlsx")}><IconDownload /> Excel</button>
+              </>
+            ) : (
+              <>
+                <a className="btn secondary" href={`/api/leads/export?${params}&fmt=csv`}><IconDownload /> CSV</a>
+                <a className="btn" href={`/api/leads/export?${params}&fmt=xlsx`}><IconDownload /> Excel</a>
+              </>
+            )}
+          </div>
+        </div>
+
         <section className="panel">
           <div className="leads-filters">
-            <input placeholder="Search name, company, email, domain, title…" value={q} onChange={(e) => setQ(e.target.value)} />
-            <label className="inline"><input type="checkbox" checked={hasEmail} onChange={(e) => resetPage(setHasEmail)(e.target.checked)} /> Has email</label>
-            <label className="inline"><input type="checkbox" checked={hasPhone} onChange={(e) => resetPage(setHasPhone)(e.target.checked)} /> Has phone</label>
+            <div className="search">
+              <IconSearch />
+              <input placeholder="Search name, company, email, domain, title…" value={q} onChange={(e) => setQ(e.target.value)} />
+            </div>
+            <button type="button" className={"toggle" + (hasEmail ? " on" : "")} onClick={() => resetPage(setHasEmail)(!hasEmail)}>Has email</button>
+            <button type="button" className={"toggle" + (hasPhone ? " on" : "")} onClick={() => resetPage(setHasPhone)(!hasPhone)}>Has phone</button>
             <input className="narrow" placeholder="Country (US)" value={country} onChange={(e) => resetPage(setCountry)(e.target.value.toUpperCase().slice(0, 2))} />
             <select value={job} onChange={(e) => resetPage(setJob)(e.target.value)}>
               <option value="">All jobs and runs</option>
               {jobs.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
             </select>
-            {data?.backgroundExports ? (
-              <>
-                <button type="button" className="secondary small" disabled={exp?.status === "queued" || exp?.status === "running"} onClick={() => void backgroundExport("csv")}>⬇ CSV</button>
-                <button type="button" className="secondary small" disabled={exp?.status === "queued" || exp?.status === "running"} onClick={() => void backgroundExport("xlsx")}>⬇ Excel</button>
-              </>
-            ) : (
-              <>
-                <a className="btn secondary small" href={`/api/leads/export?${params}&fmt=csv`}>⬇ CSV</a>
-                <a className="btn secondary small" href={`/api/leads/export?${params}&fmt=xlsx`}>⬇ Excel</a>
-              </>
-            )}
           </div>
-          <p className="hint">Downloads include every lead that matches these filters, not just this page.</p>
           {exp && (
             <div className={exp.status === "failed" ? "error" : "ok-line"}>
-              {exp.status === "queued" || exp.status === "running" ? "⏳ Preparing your file in the background…"
-                : exp.status === "done" ? <>✓ Ready: {Number(exp.rows ?? 0).toLocaleString()} rows. <a href={exp.url ?? "#"}>⬇ Download</a> (link valid for 1 hour)</>
+              {busyExport ? "Preparing your file in the background…"
+                : exp.status === "done" ? <>Ready: {Number(exp.rows ?? 0).toLocaleString()} rows. <a href={exp.url ?? "#"}>Download</a> (link valid for 1 hour)</>
                 : `Export failed: ${exp.error}`}
             </div>
           )}
-          <div className="table-wrap tall">
-            <table>
-              <thead><tr>{cols.map((c) => <th key={c}>{humanize(c)}</th>)}</tr></thead>
+          <div className={"table-wrap tall" + (loading ? " loading" : "")}>
+            <table className="leads">
+              <thead><tr>
+                <th>Lead</th><th>Company</th><th>Email</th><th>Phone</th>
+                {extra.map((c) => <th key={c}>{humanize(c)}</th>)}
+                <th>LinkedIn</th><th>Saved</th>
+              </tr></thead>
               <tbody>
                 {!data ? (
-                  <tr className="empty"><td>Loading…</td></tr>
+                  <tr className="empty"><td colSpan={7}>Loading…</td></tr>
                 ) : data.rows.length === 0 ? (
-                  <tr className="empty"><td>No leads match.</td></tr>
+                  <tr className="empty"><td colSpan={7}>No leads match these filters.</td></tr>
                 ) : data.rows.map((r, i) => (
                   <tr key={i}>
-                    {cols.map((c) => {
-                      const v = r[c];
-                      if (v === undefined || v === "") {
-                        const status = c === "email" ? r.email_status : c === "phone" ? r.phone_status : "";
-                        return <td key={c}><span className="none">{String(status || "").replace(/_/g, " ")}</span></td>;
-                      }
-                      if (/_url$/.test(c)) return <td key={c}><a href={String(v)} target="_blank" rel="noopener">link</a></td>;
-                      if (c === "saved_at") return <td key={c}>{String(v).slice(0, 10)}</td>;
-                      return <td key={c} title={String(v)} className={c === "failed_step" ? "error" : undefined}>{String(v).slice(0, 60)}</td>;
-                    })}
+                    <td>
+                      <div className="lead">
+                        <span className="avatar">{initials(r.full_name ?? r.company_name)}</span>
+                        <div><b>{r.full_name ?? <span className="none">no name</span>}</b><small title={r.job_title}>{String(r.job_title ?? "").slice(0, 48)}</small></div>
+                      </div>
+                    </td>
+                    <td><div className="stack"><span>{r.company_name ?? ""}</span><small>{r.company_domain ?? ""}</small></div></td>
+                    <td>{r.email ? <span className="contact">{r.email}</span> : <span className="none">{String(r.email_status ?? "").replace(/_/g, " ")}</span>}</td>
+                    <td>{r.phone ? <span className="contact">{r.phone}</span> : <span className="none">{String(r.phone_status ?? "").replace(/_/g, " ")}</span>}</td>
+                    {extra.map((c) => (
+                      <td key={c} title={String(r[c] ?? "")} className={c === "failed_step" ? "error" : undefined}>{r[c] === undefined || r[c] === "" ? "" : String(r[c]).slice(0, 40)}</td>
+                    ))}
+                    <td className="links">
+                      {r.person_linkedin_url && <a href={String(r.person_linkedin_url)} target="_blank" rel="noopener">Person</a>}
+                      {r.company_linkedin_url && <a href={String(r.company_linkedin_url)} target="_blank" rel="noopener">Company</a>}
+                    </td>
+                    <td className="soft">{String(r.saved_at ?? "").slice(0, 10)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <div className="pager">
-            <button type="button" className="secondary small" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>← Prev</button>
             <span className="muted">Page {page.toLocaleString()}{pages ? ` of ${pages.toLocaleString()}` : ""}</span>
-            <button type="button" className="secondary small" disabled={!data?.hasMore || loading} onClick={() => setPage(page + 1)}>Next →</button>
+            <button type="button" className="secondary small" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}>Previous</button>
+            <button type="button" className="secondary small" disabled={!data?.hasMore || loading} onClick={() => setPage(page + 1)}>Next</button>
           </div>
         </section>
       </main>
     </>
   );
+}
+
+function initials(name?: string) {
+  const parts = String(name ?? "").trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
 }

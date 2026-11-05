@@ -256,7 +256,12 @@ export async function runStats(run: RunRow): Promise<RunStats> {
       skipped: c.skipped ?? 0, filtered: c.filtered ?? 0, cached: c.cached ?? 0,
     };
   });
-  return { stages, saved: run.saved, records_used: run.records_used, max_records: run.max_records, failed: await failedCount(run.id) };
+  const end = run.finished_at ? new Date(run.finished_at).getTime() : Date.now();
+  return {
+    stages, saved: run.saved, records_used: run.records_used, max_records: run.max_records, failed: await failedCount(run.id),
+    status: run.status, elapsed: Math.max(0, Math.round((end - new Date(run.created_at).getTime()) / 1000)),
+    max_items: run.max_items, source_count: run.source_count, source_done: run.source_done,
+  };
 }
 
 /** Everything new for a live viewer since its last poll. */

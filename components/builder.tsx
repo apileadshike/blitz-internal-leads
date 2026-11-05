@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { IconCheck, IconChevron, IconDownload, IconPlay, IconRefresh, IconStop, IconUp, IconX } from "./icons";
 import { Header } from "./header";
+import { dialog } from "./dialog";
 import { PRESETS, type Pipeline } from "./presets";
 import { StepForm, cleanParams, humanize } from "./schema-form";
 import { DEFAULT_CHAIN, ImportPanel, baseName, buildImport, companyPair, estimateRecords, sourceFor, type ImportResult, type ImportState } from "./import-panel";
@@ -20,7 +22,18 @@ type StageStats = {
   received: number; waiting: number; in_flight: number; done: number; out: number; duplicates: number;
   hits: number; errors: number; records: number; skipped: number; filtered: number; cached?: number;
 };
-type RunStats = { stages: StageStats[]; saved: number; records_used: number; max_records: number; failed?: number };
+type RunStats = {
+  stages: StageStats[]; saved: number; records_used: number; max_records: number; failed?: number;
+  status?: string; elapsed?: number; max_items?: number; source_count?: number; source_done?: boolean;
+};
+
+/** 45s, 3m 12s, 1h 4m */
+function fmtDur(sec: number) {
+  const s = Math.max(0, Math.round(sec));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
 type LogEv = { at: number; stage: string; message: string };
 type Row = Record<string, any>;
 
@@ -42,7 +55,10 @@ const loadSaved = (): Record<string, Pipeline> => JSON.parse(localStorage.getIte
 export function Builder() {
   const [catalog, setCatalog] = useState<CatalogStep[]>([]);
   const byId = useMemo(() => Object.fromEntries(catalog.map((s) => [s.id, s])), [catalog]);
-  const [account, setAccount] = useState("Loading account…");
+  const [account, setAccount] = useState<{ error?: string; plan?: string; left?: number; rps?: number; people?: number; companies?: number } | null>(null);
+  /** Steps whose settings are folded away (by uid). */
+  const [folded, setFolded] = useState<Set<number>>(new Set());
+  const toggleFold = (uid: number) => setFolded((f) => { const n = new Set(f); if (n.has(uid)) n.delete(uid); else n.add(uid); return n; });
 
   // builder state
   const [steps, setSteps] = useState<BuilderStep[]>([]);
@@ -79,6 +95,8 @@ export function Builder() {
   const [logs, setLogs] = useState<LogEv[]>([]);
   const [rows, setRows] = useState<Row[]>([]);
   const [newestCount, setNewestCount] = useState(0);
+  const [tab, setTab] = useState<"results" | "activity">("results");
+  const samples = useRef<{ t: number; work: number; saved: number }[]>([]);
 
   function loadPipeline(p: Pipeline, cat = byId) {
     setSteps(p.steps.filter((s) => cat[s.step]).map((s) => ({ uid: nextUid(), id: s.step, params: structuredClone(s.params ?? {}) })));
@@ -98,8 +116,8 @@ export function Builder() {
       setCatalog(cat);
       const a = meta.account;
       setAccount(a?.error
-        ? `API key problem: ${a.error}`
-        : `${a.active_plans?.[0]?.name ?? "plan"} · ${Number(a.records_remaining).toLocaleString()} records left · ${a.max_requests_per_seconds} req/s per endpoint · DB: ${meta.db.people} people, ${meta.db.companies} companies`);
+        ? { error: a.error }
+        : { plan: a.active_plans?.[0]?.name ?? "plan", left: Number(a.records_remaining), rps: a.max_requests_per_seconds, people: meta.db.people, companies: meta.db.companies });
       const first = Object.keys(PRESETS)[0];
       loadPipeline(PRESETS[first], Object.fromEntries(cat.map((s) => [s.id, s])));
       setPreset("p:" + first); // the default recipe is loaded, so show its name
@@ -143,9 +161,18 @@ export function Builder() {
     const p = v.startsWith("p:") ? PRESETS[name] : saved[name];
     if (p) loadPipeline(p);
   };
-  const savePipeline = () => {
-    const name = prompt("Name this pipeline:");
+  const savePipeline = async () => {
+    const name = await dialog.prompt({
+      title: "Save pipeline",
+      message: "Saved in this browser. Load it again from the recipe list under \"My saved pipelines\".",
+      placeholder: "e.g. SaaS founders US",
+      defaultValue: preset.startsWith("s:") ? preset.slice(2) : "",
+      confirmLabel: "Save",
+    });
     if (!name) return;
+    if (loadSaved()[name] && !(await dialog.confirm({
+      title: `Replace "${name}"?`, message: "A saved pipeline with this name already exists. Saving replaces it.", confirmLabel: "Replace",
+    }))) return;
     const next = { ...loadSaved(), [name]: currentPipeline() };
     localStorage.setItem("pipelines", JSON.stringify(next));
     setSaved(next);
@@ -178,7 +205,7 @@ export function Builder() {
       const linkedin = String(steps[0].params?.list ?? "").split(/[\r\n,;]+/).filter((x) => /linkedin\.com\//i.test(x)).length;
       const paid = (steps[0].id === "list_domains" ? typed - linkedin : typed) + Number(steps[0].params?.upload_paid ?? up);
       const est = estimateRecords(steps, byId, n, paid);
-      setPreview(<>📋 {n.toLocaleString()} rows in the list → up to <b>{est.toLocaleString()}</b> records for everything (lookups that find nothing are free, so usually less).</>);
+      setPreview(<>{n.toLocaleString()} rows in the list, up to <b>{est.toLocaleString()}</b> records for everything (lookups that find nothing are free, so usually less).</>);
       return;
     }
     if (!/^POST /.test(byId[steps[0].id]?.endpoint ?? "")) {
@@ -192,7 +219,7 @@ export function Builder() {
       if (!r.ok) return setFormError(`Estimate failed: ${j.error}`);
       const n = all ? j.usable : Math.min(j.usable, Number(maxItems));
       const est = estimateRecords(steps, byId, n);
-      setPreview(<>🔎 Blitz has <b>{Number(j.total).toLocaleString()}</b> matches{j.total > 50_000 ? " (one search returns at most 50,000; split it with a job split)" : ""}.
+      setPreview(<>Blitz has <b>{Number(j.total).toLocaleString()}</b> matches{j.total > 50_000 ? " (one search returns at most 50,000; split it with a job split)" : ""}.
         {" "}For {all ? "all results" : `your max of ${Number(maxItems).toLocaleString()}`} ({n.toLocaleString()} rows): up to <b>{est.toLocaleString()}</b> records.
         {" "}<span className="muted">(This check used {j.records_used} record.)</span></>);
     } finally {
@@ -229,7 +256,7 @@ export function Builder() {
       }) });
       const j = await r.json();
       if (!r.ok) return setFormError(j.error);
-      setJobMsg(<>✓ Job <b>{name}</b> created. It runs in the background until done. <a href="/jobs">Open Jobs →</a></>);
+      setJobMsg(<>Job <b>{name}</b> created. It runs in the background until done. <a href="/jobs">Open Jobs</a></>);
     } finally {
       setCreating(false);
     }
@@ -302,7 +329,7 @@ export function Builder() {
     }) });
     const j = await r.json();
     if (!r.ok) return setFormError(j.error);
-    setSideMsg(<>✓ Job <b>{name}</b> created ({values.length.toLocaleString()} rows, up to {est.toLocaleString()} records). <a href="/jobs">Open Jobs →</a></>);
+    setSideMsg(<>Job <b>{name}</b> created ({values.length.toLocaleString()} rows, up to {est.toLocaleString()} records). <a href="/jobs">Open Jobs</a></>);
   }
 
   async function onFile(f: File) {
@@ -401,15 +428,60 @@ export function Builder() {
   }, [rows]);
   const shown = useMemo(() => rows.slice(-500).reverse(), [rows]);
 
+  const budgetPct = stats && stats.max_records ? Math.min(100, (stats.records_used / stats.max_records) * 100) : 0;
+
+  // ── speed and ETA, from the last ~15 seconds of live stats ──
+  const speed = useMemo(() => {
+    if (!stats) { samples.current = []; return null; }
+    const after = stats.stages.length - 1;
+    // Work done so far: lookups in the steps after step 1 (or results found, for a search on its own).
+    const work = after > 0
+      ? stats.stages.slice(1).reduce((a, x) => a + x.done, 0)
+      : stats.stages[0].out + stats.stages[0].duplicates;
+    const now = Date.now();
+    samples.current = [...samples.current.filter((x) => now - x.t < 15_000), { t: now, work, saved: stats.saved }];
+    const first = samples.current[0];
+    const secs = (now - first.t) / 1000;
+    if (secs < 2) return null;
+    const perSec = (work - first.work) / secs;
+    const leadsPerMin = ((stats.saved - first.saved) / secs) * 60;
+    // What's left: rows waiting in the steps, plus results not fetched yet (when the run has a limit).
+    const queued = stats.stages.slice(1).reduce((a, x) => a + x.waiting + x.in_flight, 0);
+    const toFetch = stats.source_done ? 0 : stats.max_items ? Math.max(0, stats.max_items - (stats.source_count ?? 0)) : null;
+    const left = toFetch === null ? null : (after > 0 ? queued + toFetch * after : toFetch);
+    const eta = left !== null && perSec > 0 ? left / perSec : null;
+    return { perSec, leadsPerMin, eta };
+  }, [stats]);
+  const finished = !!stats && !running && !!stats.status && !["running", "draining"].includes(stats.status);
+  const found = (id: string) => {
+    const st = stats?.stages.find((x) => x.id === id);
+    return st && st.done ? { hits: st.hits, pct: Math.round((100 * st.hits) / st.done) } : null;
+  };
+  const fmt = (n?: number) => (n ?? 0).toLocaleString();
+
   return (
     <>
-      <Header active="builder" right={<div className="muted">{account}</div>} />
-      <main>
-        {/* ───────── Builder ───────── */}
-        <section className="panel builder">
-          <h2>1 · Build your pipeline</h2>
-          <div className="recipe-bar">
-            <select value={preset} onChange={(e) => onPreset(e.target.value)}>
+      <Header active="builder" right={
+        <div className="stat-chips">
+          {!account ? <span className="stat-chip">Loading account…</span>
+            : account.error ? <span className="stat-chip err">API key problem: {account.error}</span>
+            : <>
+                <span className="stat-chip"><span className="live" />{account.plan}</span>
+                <span className="stat-chip"><b>{fmt(account.left)}</b> records left</span>
+                <span className="stat-chip"><b>{account.rps}</b> req/s</span>
+                <span className="stat-chip"><b>{fmt(account.people)}</b> people · <b>{fmt(account.companies)}</b> companies</span>
+              </>}
+        </div>
+      } />
+      <main className="workspace">
+        <div className="col-left">
+        <div className="page-head">
+          <div>
+            <h2>Pipeline builder</h2>
+            <p>Find leads, enrich them step by step, and save them. Every step runs at the same time.</p>
+          </div>
+          <div className="toolbar">
+            <select value={preset} onChange={(e) => onPreset(e.target.value)} title="Start from a ready-made recipe or one you saved">
               <option value="">Load a recipe…</option>
               <optgroup label="Recipes">
                 {Object.keys(PRESETS).map((k) => <option key={k} value={"p:" + k}>{k}</option>)}
@@ -420,28 +492,38 @@ export function Builder() {
                 </optgroup>
               )}
             </select>
-            <button type="button" className="secondary" onClick={savePipeline} title="Save this pipeline in your browser">Save</button>
+            <button type="button" className="secondary" onClick={() => void savePipeline()} title="Save this pipeline in your browser">Save</button>
             <button type="button" className="secondary" disabled={importing} onClick={() => fileInput.current?.click()}
               title="CSV or Excel list of domains, LinkedIn URLs, emails or phones, or a saved pipeline/job (.json)">
-              {importing ? "Reading…" : "📂 Import file"}
+              {importing ? "Reading…" : "Import file"}
             </button>
             <input ref={fileInput} type="file" hidden accept=".csv,.tsv,.txt,.xlsx,.json"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }} />
+          </div>
+        </div>
+
+        {/* ───────── Builder ───────── */}
+        <section className="panel builder">
+          <div className="panel-h">
+            <div>
+              <h2>Steps <span className="count">{steps.length}</span></h2>
+              <div className="sub">Step 1 finds data (or import a file). Each next step works on what the steps before it found.</div>
+            </div>
           </div>
           {imp && (
             <ImportPanel state={imp} onChange={(st) => applyImport(st)} onClose={() => setImp(null)}
               onSideJob={(c, t) => void createSideJob(c, t)} sideJobMsg={sideMsg}
               estimate={steps.length ? (() => { const x = buildImport(imp); return estimateRecords(steps, byId, x.values.length, x.paidFirst); })() : null} />
           )}
-          <p className="hint">Step 1 finds data (or import a file). Each step after that works on what the previous steps found. All steps run at the same time.</p>
 
-          <div>
+          <div className="steps">
             {steps.map((s, i) => {
               const def = byId[s.id];
               if (!def) return null;
               const have = entitiesBefore(i);
               const invalid = i === 0 ? def.group !== "source" : def.group === "source" || (!!def.needs && !have.has(def.needs));
               const hasFields = Object.keys(def.schema.properties).length > 0;
+              const open = !folded.has(s.uid);
               return (
                 <div key={s.uid}>
                   <div className={"step" + (invalid ? " invalid" : "")}>
@@ -452,165 +534,230 @@ export function Builder() {
                         <select value={s.id} onChange={(e) => updateStep(0, { id: e.target.value, params: {}, uid: nextUid() })}>
                           {catalog.filter((c) => c.group === "source").map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
                         </select>
-                      ) : (
-                        <>
-                          <b>{def.label}</b>
-                          <span className="ctrls">
-                            <button type="button" className="link" title="Move up" disabled={i === 1} onClick={() => move(i)}>↑</button>
-                            <button type="button" className="link" title="Remove" onClick={() => remove(i)}>✕</button>
-                          </span>
-                        </>
-                      )}
+                      ) : <b>{def.label}</b>}
+                      <span className={"group-tag " + def.group}>{def.group}</span>
+                      <span className="ctrls">
+                        {hasFields && (
+                          <button type="button" className="link" title={open ? "Hide settings" : "Show settings"} onClick={() => toggleFold(s.uid)}>
+                            <IconChevron className={"chev" + (open ? " open" : "")} />
+                          </button>
+                        )}
+                        {i > 0 && <>
+                          <button type="button" className="link" title="Move up" disabled={i === 1} onClick={() => move(i)}><IconUp /></button>
+                          <button type="button" className="link" title="Remove" onClick={() => remove(i)}><IconX /></button>
+                        </>}
+                      </span>
                     </div>
                     <div className="step-meta">
                       <code>{def.endpoint}</code> · {def.help}
-                      {def.docs && <> <a href={def.docs} target="_blank">Setup guide →</a></>}
+                      {def.docs && <> <a href={def.docs} target="_blank">Setup guide</a></>}
                     </div>
                     {invalid && <div className="error">{def.group === "source" ? "Sources can only be step 1" : `Needs ${def.needs} data. Add a step that provides it first.`}</div>}
                     {i === 0 && s.params.upload_name && (
                       <div className="upload-note">
-                        📄 {String(s.params.upload_name)}: {Number(s.params.upload_count ?? 0).toLocaleString()} rows
+                        {String(s.params.upload_name)}: {Number(s.params.upload_count ?? 0).toLocaleString()} rows
                         {s.params.upload_id ? " uploaded" : uploading ? ` uploading… ${uploading.done.toLocaleString()} / ${uploading.total.toLocaleString()}` : " (not uploaded)"}
                         {" "}(plus anything typed below){" "}
                         <button type="button" className="link" onClick={() => updateStep(0, { params: { ...s.params, upload_id: undefined, upload_name: undefined, upload_count: undefined, upload_paid: undefined, upload_pending: undefined } })}>remove file</button>
                       </div>
                     )}
-                    {hasFields && (
+                    {hasFields && open && (
                       <div className="step-body">
                         <StepForm schema={def.schema} value={s.params} onChange={(params) => updateStep(i, { params })} />
                       </div>
                     )}
                   </div>
                   {def.dedupe_on && (
-                    <div className="dedupe">🔁 duplicate check on <b>{def.dedupe_on}</b> (skips repeats in this run{def.dedupe_on === "job" ? "" : ", and earlier runs if ticked below"})</div>
+                    <div className="dedupe">Duplicate check on <b>{def.dedupe_on}</b>: skips repeats in this run{def.dedupe_on === "job" ? "" : ", and earlier runs if switched on below"}</div>
                   )}
-                  <div className="down">↓</div>
+                  <div className="down" />
                 </div>
               );
             })}
+            <div className="add-step">
+              <select value={addSelected} onChange={(e) => setAddValue(e.target.value)}>
+                {ADD_GROUPS.map(([g, label]) => (
+                  <optgroup key={g} label={label}>
+                    {addOptions.filter((c) => c.group === g).map((c) => {
+                      const ok = !c.needs || haveAll.has(c.needs);
+                      return <option key={c.id} value={c.id} disabled={!ok}>{c.label}{ok ? "" : ` (needs ${c.needs})`}</option>;
+                    })}
+                  </optgroup>
+                ))}
+              </select>
+              <button type="button" className="secondary" onClick={add}>+ Add step</button>
+            </div>
             {steps.length > 0 && (
-              <div className="step save">
-                <div className="step-h"><span className="num">✓</span><b>Save</b></div>
-                <div className="step-meta">Database + CSV/Excel download</div>
-              </div>
+              <>
+                <div className="down" />
+                <div className="step save">
+                  <div className="step-h"><span className="num"><IconCheck /></span><b>Save</b></div>
+                  <div className="step-meta">Saved to your database, with a CSV / Excel download.</div>
+                </div>
+              </>
             )}
           </div>
 
-          <div className="add-step">
-            <select value={addSelected} onChange={(e) => setAddValue(e.target.value)}>
-              {ADD_GROUPS.map(([g, label]) => (
-                <optgroup key={g} label={label}>
-                  {addOptions.filter((c) => c.group === g).map((c) => {
-                    const ok = !c.needs || haveAll.has(c.needs);
-                    return <option key={c.id} value={c.id} disabled={!ok}>{c.label}{ok ? "" : ` (needs ${c.needs})`}</option>;
-                  })}
-                </optgroup>
-              ))}
-            </select>
-            <button type="button" className="secondary" onClick={add}>+ Add step</button>
-          </div>
-
-          <fieldset className="settings">
-            <legend>Run settings</legend>
-            <div className="row">
+          <div className="card">
+            <div className="card-h">Run settings</div>
+            <div className="grid3">
               <label>Max results from step 1
                 <input type="number" min={1} value={maxItems} disabled={all} onChange={(e) => setMaxItems(Number(e.target.value))} />
-                <span className="inline all-toggle"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> All results</span>
+                <span className="all-toggle"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> All results</span>
               </label>
-              <label>Workers per step <input type="number" min={1} max={50} value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} /></label>
-              <label>Record budget (stop at) <input type="number" min={1} value={maxRecords} onChange={(e) => setMaxRecords(Number(e.target.value))} /></label>
+              <label title="How many lookups each step makes at the same time (1–50). Speed only: the cost is the same.">Workers per step
+                <input type="number" min={1} max={50} value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} />
+              </label>
+              <label title="The run stops before spending more than this many records.">Record budget
+                <input type="number" min={1} value={maxRecords} onChange={(e) => setMaxRecords(Number(e.target.value))} />
+              </label>
             </div>
-            {all && <p className="hint">All results: keeps going until the filter has no more results (Blitz stops at 50,000 per search). The record budget still applies, so raise it for big pulls.</p>}
-            <label className="inline"><input type="checkbox" checked={skipSeenPeople} onChange={(e) => setSkipSeenPeople(e.target.checked)} /> Skip people already in my database</label>
-            <label className="inline"><input type="checkbox" checked={skipSeenCompanies} onChange={(e) => setSkipSeenCompanies(e.target.checked)} /> Skip companies already in my database</label>
-            <label className="inline" title="Emails, phones, company and person lookups done in the last 30–180 days are reused for free. Untick for fresh data.">
-              <input type="checkbox" checked={useCache} onChange={(e) => setUseCache(e.target.checked)} /> Reuse recent lookup answers (free) instead of paying again
-            </label>
-          </fieldset>
+            {all && <p className="hint">All results: keeps going until the search has no more results (Blitz stops at 50,000 per search). The record budget still applies, so raise it for big pulls.</p>}
+            <div style={{ marginTop: 10 }}>
+              <label className="switch"><input type="checkbox" checked={skipSeenPeople} onChange={(e) => setSkipSeenPeople(e.target.checked)} />
+                <span>Skip people already in my database<small>Only new people are enriched and saved.</small></span></label>
+              <label className="switch"><input type="checkbox" checked={skipSeenCompanies} onChange={(e) => setSkipSeenCompanies(e.target.checked)} />
+                <span>Skip companies already in my database<small>Only new companies are enriched and saved.</small></span></label>
+              <label className="switch"><input type="checkbox" checked={useCache} onChange={(e) => setUseCache(e.target.checked)} />
+                <span>Reuse recent lookups for free<small>Emails, phones and profiles found in the last 30–180 days. Switch off for fresh data.</small></span></label>
+            </div>
+          </div>
 
-          <fieldset className="settings">
-            <legend>Job (runs in the background until done)</legend>
+          <div className="card">
+            <div className="card-h">Background job<span className="sub">optional</span></div>
             <div className="row">
               <label>Job name <input value={jobName} placeholder="e.g. SaaS founders US" onChange={(e) => setJobName(e.target.value)} /></label>
-              <label>Repeat every (hours) <input type="number" min={0} value={repeatHours} placeholder="once" onChange={(e) => setRepeatHours(e.target.value)} /></label>
+              <label>Repeat every (hours) <input type="number" min={0} value={repeatHours} placeholder="Run once" onChange={(e) => setRepeatHours(e.target.value)} /></label>
             </div>
-            <p className="hint">A job takes &quot;Max results&quot; from step 1 (or everything when &quot;All results&quot; is ticked) and never spends more than the record budget: it fetches only what the budget can also enrich.</p>
-          </fieldset>
-
-          <div className="actions">
-            <button type="button" onClick={createJob} disabled={creating || !steps.length || !!uploading}
-              title="Add this pipeline to the job queue. It runs in the background until the list or search is done.">
-              {creating ? "Creating…" : uploading ? "Uploading list…" : "⏱ Create job"}
-            </button>
-            <button type="button" className="secondary" onClick={testTen} disabled={running || !steps.length || !!uploading} title="Run only the first 10 rows now, to check the results">🧪 Test 10 rows</button>
-            <button type="button" className="secondary" onClick={() => void estimateCost()} disabled={previewing || !steps.length}
-              title="Estimate the cost. For a search this asks Blitz how many matches there are (uses 1 record).">
-              {previewing ? "Checking…" : "💰 Estimate cost"}
-            </button>
+            <p className="hint">A job runs in the background until done, even when this page is closed. It never spends more than the record budget.</p>
           </div>
-          <div className="actions">
-            <button type="button" className="secondary" onClick={() => void start()} disabled={running || !!uploading}>▶ Run now (uses max results)</button>
-            <button type="button" className="secondary" onClick={stop} disabled={!running}>■ Stop</button>
+
+          <div className="actionbar">
+            <div className="primary-row">
+              <button type="button" className="big-btn" onClick={() => void start()} disabled={running || !steps.length || !!uploading}
+                title="Run now with Max results from step 1, and watch it live"><IconPlay size={12} /> Run now</button>
+              <button type="button" className="secondary big-btn" onClick={createJob} disabled={creating || !steps.length || !!uploading}
+                title="Add this pipeline to the job queue. It runs in the background until the list or search is done.">
+                {creating ? "Creating…" : uploading ? "Uploading list…" : "Create job"}
+              </button>
+            </div>
+            <div className="secondary-row">
+              <button type="button" className="ghost small" onClick={testTen} disabled={running || !steps.length || !!uploading} title="Run only the first 10 rows now, to check the results">Test 10 rows</button>
+              <button type="button" className="ghost small" onClick={() => void estimateCost()} disabled={previewing || !steps.length}
+                title="Estimate the cost. For a search this asks Blitz how many matches there are (uses 1 record).">
+                {previewing ? "Checking…" : "Estimate cost"}
+              </button>
+              <button type="button" className="danger small" onClick={stop} disabled={!running}><IconStop size={11} /> Stop</button>
+            </div>
           </div>
           {preview && <div className="preview-line">{preview}</div>}
           {formError && <div className="error">{formError}</div>}
           {jobMsg && <div className="ok-line">{jobMsg}</div>}
         </section>
 
-        {/* ───────── Live ───────── */}
-        <section className="panel">
-          <div className="row between">
-            <h2>2 · Live pipeline</h2>
-            <div className="muted">{stats ? `${stats.records_used.toLocaleString()} / ${stats.max_records.toLocaleString()} records used` : ""}</div>
-          </div>
-          <div className="pipeline">
-            {stats ? <Stages stats={stats} byId={byId} /> : <p className="muted">Build a pipeline and press Run.</p>}
-          </div>
-          {runId && !running && (stats?.failed ?? 0) > 0 && (
-            <div className="rerun-line">
-              ⚠ {stats!.failed} lead(s) had a step fail (see the <b>Failed step</b> column).{" "}
-              <button type="button" className="small" onClick={() => void rerunFailed()}>↻ Re-run failed</button>
-              <span className="muted"> Only those leads, from the step that failed.</span>
-            </div>
-          )}
-          {runId && !running && (
-            <div className="downloads">
-              <a className="btn secondary" href={`/api/runs/${runId}/rows?fmt=csv`}>⬇ This run (CSV)</a>
-              <a className="btn secondary" href={`/api/runs/${runId}/rows?fmt=xlsx`}>⬇ This run (Excel)</a>
-            </div>
-          )}
-          <h3>Activity</h3>
-          <ol id="log">
-            {logs.map((ev, i) => (
-              <li key={logs.length - i}><span className="t">{(ev.at / 1000).toFixed(1)}s</span><span className="s">{ev.stage}</span>{ev.message}</li>
-            ))}
-          </ol>
-        </section>
+        </div>
 
-        {/* ───────── Results ───────── */}
-        <section className="panel wide">
-          <div className="row between">
-            <h2>3 · Results <span className="muted">{rows.length ? `(${rows.length})` : ""}</span></h2>
-            <div>
-              <a className="btn secondary" href="/api/rows?fmt=csv">⬇ Everything (CSV)</a>{" "}
-              <a className="btn secondary" href="/api/rows?fmt=xlsx">⬇ Everything (Excel)</a>
+        {/* ───────── Right: live view + results / activity ───────── */}
+        <div className="col-right">
+          <section className="panel live">
+            <div className="panel-h">
+              <div>
+                <h2>Live pipeline {running && <span className="pill running"><span className="pulse-dot" />Running</span>}</h2>
+                <div className="sub">{runId ? `Run ${runId}` : "Nothing running yet"}</div>
+              </div>
+              {stats && (
+                <div className="budget">
+                  <div className="budget-top"><span>Records used</span><span><b>{fmt(stats.records_used)}</b> / {fmt(stats.max_records)}</span></div>
+                  <div className="budget-bar"><div style={{ width: `${budgetPct}%` }} /></div>
+                </div>
+              )}
             </div>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr>{columns.map((c) => <th key={c}>{humanize(c)}</th>)}</tr></thead>
-              <tbody>
-                {shown.length === 0 ? (
-                  <tr className="empty"><td>Rows appear here as soon as each one finishes the last step.</td></tr>
-                ) : shown.map((r, i) => (
-                  <tr key={rows.length - i} className={i < newestCount ? "new" : undefined}>
-                    {columns.map((c) => <Cell key={c} row={r} col={c} />)}
-                  </tr>
+            {stats && running && (
+              <div className="metrics">
+                <div className="metric"><span>Speed</span><b>{speed ? Math.round(speed.perSec).toLocaleString() : "…"}</b><small>lookups / sec</small></div>
+                <div className="metric"><span>Leads</span><b>{speed ? Math.round(speed.leadsPerMin).toLocaleString() : "…"}</b><small>per minute</small></div>
+                <div className="metric"><span>Elapsed</span><b>{fmtDur(stats.elapsed ?? 0)}</b><small>since start</small></div>
+                <div className="metric"><span>Time left</span><b>{speed?.eta != null ? fmtDur(speed.eta) : "…"}</b><small>{speed?.eta != null ? "estimated" : stats.source_done || stats.max_items ? "measuring" : "until the search ends"}</small></div>
+              </div>
+            )}
+            {finished && stats && (
+              <div className="summary">
+                <div className="summary-h">
+                  <span className={"pill " + (stats.status === "done" ? "done" : stats.status === "error" ? "failed" : "paused")}>
+                    {stats.status === "done" ? "Finished" : stats.status === "error" ? "Failed" : "Stopped"}
+                  </span>
+                  <span className="muted">in {fmtDur(stats.elapsed ?? 0)}</span>
+                  {runId && <a className="btn small" href={`/api/runs/${runId}/rows?fmt=xlsx`}><IconDownload /> Download Excel</a>}
+                </div>
+                <div className="metrics">
+                  <div className="metric"><span>Leads saved</span><b>{fmt(stats.saved)}</b><small>{stats.elapsed ? `${Math.round((stats.saved / stats.elapsed) * 60).toLocaleString()} per minute` : ""}</small></div>
+                  {found("find_email") && <div className="metric"><span>Emails found</span><b>{found("find_email")!.pct}%</b><small>{fmt(found("find_email")!.hits)} emails</small></div>}
+                  {found("find_phone") && <div className="metric"><span>Phones found</span><b>{found("find_phone")!.pct}%</b><small>{fmt(found("find_phone")!.hits)} phones</small></div>}
+                  <div className="metric"><span>Records used</span><b>{fmt(stats.records_used)}</b><small>{stats.saved ? `${(stats.records_used / stats.saved).toFixed(1)} per lead` : "no leads saved"}</small></div>
+                </div>
+              </div>
+            )}
+            <div className="pipeline">
+              {stats ? <Stages stats={stats} byId={byId} /> : (
+                <div className="empty-state">
+                  <b>Ready when you are</b>
+                  Build your steps on the left, then press Run now or Test 10 rows.
+                </div>
+              )}
+            </div>
+            {runId && !running && (stats?.failed ?? 0) > 0 && (
+              <div className="rerun-line">
+                {stats!.failed} lead(s) had a step fail (see the <b>Failed step</b> column).
+                <button type="button" className="small" onClick={() => void rerunFailed()}><IconRefresh size={12} /> Re-run failed</button>
+                <span className="muted">Only those leads, from the step that failed.</span>
+              </div>
+            )}
+          </section>
+
+          <section className="panel dock">
+            <div className="dock-h">
+              <div className="tabs">
+                <button type="button" className={"tab" + (tab === "results" ? " on" : "")} onClick={() => setTab("results")}>
+                  Results {rows.length > 0 && <span className="count">{rows.length.toLocaleString()}</span>}
+                </button>
+                <button type="button" className={"tab" + (tab === "activity" ? " on" : "")} onClick={() => setTab("activity")}>
+                  Activity {logs.length > 0 && <span className="count">{logs.length.toLocaleString()}</span>}
+                </button>
+              </div>
+              <div className="toolbar">
+                {/* Only this run's leads here; everything else is on the Leads page. */}
+                {runId && <>
+                  <a className="btn secondary small" href={`/api/runs/${runId}/rows?fmt=csv`}
+                    title={running ? "The leads this run has saved so far" : "Every lead this run saved"}><IconDownload /> CSV</a>
+                  <a className="btn secondary small" href={`/api/runs/${runId}/rows?fmt=xlsx`}
+                    title={running ? "The leads this run has saved so far" : "Every lead this run saved"}><IconDownload /> Excel</a>
+                </>}
+              </div>
+            </div>
+            {tab === "results" ? (
+              <div className="table-wrap fill">
+                <table>
+                  <thead><tr>{(columns.length ? columns : ["full_name", "job_title", "email", "phone", "company_name"]).map((c) => <th key={c}>{humanize(c)}</th>)}</tr></thead>
+                  <tbody>
+                    {shown.length === 0 ? (
+                      <tr className="empty"><td colSpan={Math.max(columns.length, 5)}>No rows yet. Leads show up here live, the moment they finish the last step.</td></tr>
+                    ) : shown.map((r, i) => (
+                      <tr key={rows.length - i} className={i < newestCount ? "new" : undefined}>
+                        {columns.map((c) => <Cell key={c} row={r} col={c} />)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <ol id="log" className="fill">
+                {logs.map((ev, i) => (
+                  <li key={logs.length - i}><span className="t">{(ev.at / 1000).toFixed(1)}s</span><span className="s">{ev.stage}</span><span>{ev.message}</span></li>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+              </ol>
+            )}
+          </section>
+        </div>
       </main>
     </>
   );
@@ -642,7 +789,7 @@ function Stages({ stats, byId }: { stats: RunStats; byId: Record<string, Catalog
         return (
           <div key={i} style={{ display: "contents" }}>
             <div className={"stage " + cls}>
-              <div className="stage-h"><span className="dot" /><span className="num">{i + 1}</span>{s.label}</div>
+              <div className="stage-h" title={s.label}><span className="dot" /><span className="num">{i + 1}</span><span className="label">{s.label}</span></div>
               <div className="big">{(i === 0 ? s.out + s.duplicates : s.done).toLocaleString()}</div>
               <div className="muted">{i === 0 ? "results" : "processed"}</div>
               {i > 0 && <><Kv k="working now" v={s.in_flight} /><Kv k="waiting" v={s.waiting} /></>}
@@ -655,12 +802,11 @@ function Stages({ stats, byId }: { stats: RunStats; byId: Record<string, Catalog
               {(s.cached ?? 0) > 0 && <Kv k="from cache (free)" v={s.cached!} />}
               <Kv k="records" v={s.records} />
             </div>
-            <div className="arrow">→</div>
           </div>
         );
       })}
       <div className={"stage " + (allDone ? "done" : "")}>
-        <div className="stage-h"><span className="dot" /><span className="num">✓</span>Save</div>
+        <div className="stage-h"><span className="dot" /><span className="num"><IconCheck size={11} /></span>Save</div>
         <div className="big">{stats.saved.toLocaleString()}</div>
         <div className="muted">rows saved</div>
       </div>

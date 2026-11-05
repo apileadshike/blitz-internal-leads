@@ -3,6 +3,7 @@
 // Every field is controlled: `value` in, `onChange(newValue)` out.
 // Empty values are cleaned out when the pipeline is sent (see cleanParams).
 import { useEffect, useId, useState } from "react";
+import { IconX } from "./icons";
 
 type S = Record<string, any>;
 type FieldProps = { name: string; schema: S; value: any; onChange: (v: any) => void };
@@ -217,7 +218,7 @@ function Chips({ name, schema, value, onChange, options }: FieldProps & { option
     <div className="field">
       <div className="flabel" title={schema.description ?? ""}>{humanize(name)}</div>
       <div className="chips">
-        {selected.map((v) => <span key={v} className="chip" onClick={() => remove(v)}>{v} ✕</span>)}
+        {selected.map((v) => <span key={v} className="chip" onClick={() => remove(v)}>{v} <IconX size={11} /></span>)}
       </div>
       <input list={id} placeholder={`Type to search ${options.length} options`} value={text}
         onChange={(e) => { if (!tryAdd(e.target.value)) setText(e.target.value); }}

@@ -2,6 +2,7 @@
 // Import a file into the builder: pick (or accept) the column with the identifiers,
 // fill step 1 with the list, and keep the file's other columns for the results.
 import { ID_TYPES, normalize, type IdType } from "@/lib/idtypes";
+import { IconX } from "./icons";
 
 export type ImportResult = {
   file: string; headers: string[]; rows: string[][]; truncated: boolean;
@@ -101,8 +102,8 @@ export function ImportPanel({ state, onChange, onClose, estimate, onSideJob, sid
   return (
     <div className="import-panel">
       <div className="row between">
-        <b>📄 {result.file}</b>
-        <button type="button" className="link" onClick={onClose} title="Hide (the list stays in step 1)">✕</button>
+        <b>{result.file}</b>
+        <button type="button" className="link" onClick={onClose} title="Hide (the list stays in step 1)"><IconX /></button>
       </div>
       <div className="muted">{result.rows.length.toLocaleString()} rows{result.truncated ? " (only the first 100,000 were read)" : ""}</div>
       <div className="row tight">
@@ -142,7 +143,7 @@ export function ImportPanel({ state, onChange, onClose, estimate, onSideJob, sid
       {sideJobMsg && <div className="ok-line">{sideJobMsg}</div>}
       <div className={built.values.length ? "ok-line" : "error"}>
         {built.values.length
-          ? <>✓ {built.values.length.toLocaleString()} unique {combining(state) ? "companies" : ID_TYPES[state.type].label.toLowerCase()} filled into step 1.
+          ? <>{built.values.length.toLocaleString()} unique {combining(state) ? "companies" : ID_TYPES[state.type].label.toLowerCase()} filled into step 1.
               {estimate !== null && <> Estimated cost: up to <b>{estimate.toLocaleString()}</b> records (record budget set to this).</>}</>
           : "No values found in this column. Pick another column."}
       </div>
