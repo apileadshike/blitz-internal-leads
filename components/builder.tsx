@@ -96,6 +96,24 @@ export function Builder() {
   const [rows, setRows] = useState<Row[]>([]);
   const [newestCount, setNewestCount] = useState(0);
   const [tab, setTab] = useState<"results" | "activity">("results");
+  // Big runs: the file is built in the background (by the worker, stored in R2) instead of streamed,
+  // because a streamed download is cut off after 5 minutes on Vercel.
+  const [exp, setExp] = useState<{ status: string; rows?: number | null; url?: string | null; error?: string | null } | null>(null);
+  async function downloadRun(fmt: "csv" | "xlsx") {
+    if (!runId) return;
+    setExp({ status: "queued" });
+    const r = await fetch(`/api/exports?run=${encodeURIComponent(runId)}&fmt=${fmt}&name=leads-${runId}`, { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return setExp({ status: "failed", error: j.error ?? `HTTP ${r.status}` });
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 2000));
+      const st = await (await fetch(`/api/exports/${j.id}`)).json().catch(() => null);
+      if (!st) continue;
+      setExp(st);
+      if (st.status === "done") { window.location.href = st.url; break; }
+      if (st.status === "failed") break;
+    }
+  }
   const samples = useRef<{ t: number; work: number; saved: number }[]>([]);
 
   function loadPipeline(p: Pipeline, cat = byId) {
@@ -408,7 +426,7 @@ export function Builder() {
   function watch(id: string) {
     source.current?.close();
     const seq = ++watchSeq.current; // a newer watch() cancels this one
-    setRunId(id); setRunning(true); setStats(null); setLogs([]); setRows([]); setNewestCount(0);
+    setRunId(id); setRunning(true); setStats(null); setLogs([]); setRows([]); setNewestCount(0); setExp(null);
     rowBuffer.current = [];
     const cursor = { log: 0, row: 0 };
     let failures = 0;
@@ -628,14 +646,14 @@ export function Builder() {
           <div className="card">
             <div className="card-h">Run settings</div>
             <div className="grid3">
-              <label>Max results from step 1
+              <label title="How many results to take from step 1 (the search or your list)."><span className="lbl">Max results</span>
                 <input type="number" min={1} value={maxItems} disabled={all} onChange={(e) => setMaxItems(Number(e.target.value))} />
                 <span className="all-toggle"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> All results</span>
               </label>
-              <label title="How many lookups each step makes at the same time (1–50). Speed only: the cost is the same.">Workers per step
+              <label title="How many lookups each step makes at the same time (1–50). Speed only: the cost is the same."><span className="lbl">Workers per step</span>
                 <input type="number" min={1} max={50} value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} />
               </label>
-              <label title="The run stops before spending more than this many records.">Record budget
+              <label title="The run stops before spending more than this many records."><span className="lbl">Record budget</span>
                 <input type="number" min={1} value={maxRecords} onChange={(e) => setMaxRecords(Number(e.target.value))} />
               </label>
             </div>
@@ -714,7 +732,9 @@ export function Builder() {
                     {stats.status === "done" ? "Finished" : stats.status === "error" ? "Failed" : "Stopped"}
                   </span>
                   <span className="muted">in {fmtDur(stats.elapsed ?? 0)}</span>
-                  {runId && <a className="btn small" href={`/api/runs/${runId}/rows?fmt=xlsx`}><IconDownload /> Download Excel</a>}
+                  {runId && ((stats.saved ?? 0) > BIG_EXPORT
+                    ? <button type="button" className="btn small" disabled={exp?.status === "queued" || exp?.status === "running"} onClick={() => void downloadRun("xlsx")}><IconDownload /> Download Excel</button>
+                    : <a className="btn small" href={`/api/runs/${runId}/rows?fmt=xlsx`}><IconDownload /> Download Excel</a>)}
                 </div>
                 <div className="metrics">
                   <div className="metric"><span>Leads saved</span><b>{fmt(stats.saved)}</b><small>{stats.elapsed ? `${Math.round((stats.saved / stats.elapsed) * 60).toLocaleString()} per minute` : ""}</small></div>
@@ -724,7 +744,7 @@ export function Builder() {
                 </div>
               </div>
             )}
-            <div className="pipeline">
+            <div className="pipeline-view">
               {stats ? <Stages stats={stats} byId={byId} /> : (
                 <div className="empty-state">
                   <b>Ready when you are</b>
@@ -753,12 +773,21 @@ export function Builder() {
               </div>
               <div className="toolbar">
                 {/* Only this run's leads here; everything else is on the Leads page. */}
-                {runId && <>
-                  <a className="btn secondary small" href={`/api/runs/${runId}/rows?fmt=csv`}
-                    title={running ? "The leads this run has saved so far" : "Every lead this run saved"}><IconDownload /> CSV</a>
-                  <a className="btn secondary small" href={`/api/runs/${runId}/rows?fmt=xlsx`}
-                    title={running ? "The leads this run has saved so far" : "Every lead this run saved"}><IconDownload /> Excel</a>
-                </>}
+                {runId && exp && exp.status !== "done" && (
+                  <span className={exp.status === "failed" ? "error" : "muted"}>
+                    {exp.status === "failed" ? `Export failed: ${exp.error}` : `Preparing file${exp.rows ? `: ${Number(exp.rows).toLocaleString()} rows` : ""}…`}
+                  </span>
+                )}
+                {runId && exp?.status === "done" && exp.url && <a className="muted" href={exp.url}>File ready, download again</a>}
+                {runId && (["csv", "xlsx"] as const).map((fmt) => (stats?.saved ?? 0) > BIG_EXPORT ? (
+                  <button key={fmt} type="button" className="secondary small" disabled={exp?.status === "queued" || exp?.status === "running"}
+                    onClick={() => void downloadRun(fmt)} title="Large run: the file is built in the background, then downloads by itself">
+                    <IconDownload /> {fmt === "csv" ? "CSV" : "Excel"}
+                  </button>
+                ) : (
+                  <a key={fmt} className="btn secondary small" href={`/api/runs/${runId}/rows?fmt=${fmt}`}
+                    title={running ? "The leads this run has saved so far" : "Every lead this run saved"}><IconDownload /> {fmt === "csv" ? "CSV" : "Excel"}</a>
+                ))}
               </div>
             </div>
             {tab === "results" ? (
@@ -790,6 +819,9 @@ export function Builder() {
   );
 }
 
+/** Above this many leads a run's download is built in the background (a streamed one would time out). */
+const BIG_EXPORT = 50_000;
+
 function Cell({ row, col }: { row: Row; col: string }) {
   const v = row[col];
   if (v === undefined) {
@@ -800,43 +832,65 @@ function Cell({ row, col }: { row: Row; col: string }) {
   return <td title={String(v)}>{String(v).slice(0, 60)}</td>;
 }
 
-function Kv({ k, v, cls = "" }: { k: string; v: number; cls?: string }) {
-  return <div className={"kv " + cls}><span>{k}</span><b>{Number(v).toLocaleString()}</b></div>;
+/** One small "number + word" fact under a stage. Zero values are left out to keep rows calm. */
+function Fact({ n, label, cls = "" }: { n: number; label: string; cls?: string }) {
+  return <span className={"fact " + cls}><b>{Number(n).toLocaleString()}</b> {label}</span>;
 }
 
+const STATE: Record<string, string> = { running: "Working", done: "Done", stopped: "Stopped", error: "Error" };
+
+/** The live pipeline as a vertical flow: one calm row per step, a progress bar, and only the numbers that matter. */
 function Stages({ stats, byId }: { stats: RunStats; byId: Record<string, CatalogStep> }) {
-  const hitLabels: Record<string, string> = { source: "", expand: "found", enrich: "found", filter: "kept", send: "sent" };
+  const hitLabels: Record<string, string> = { expand: "found", enrich: "found", filter: "kept", send: "sent" };
   const allDone = stats.stages.every((s) => s.status !== "running");
   return (
-    <>
+    <div className="flow">
       {stats.stages.map((s, i) => {
-        const busy = s.status === "running" && (i === 0 || s.in_flight > 0);
-        const cls = s.status === "running" ? (busy ? "running" : "") : s.status;
+        const first = i === 0;
+        const busy = s.status === "running" && (first || s.in_flight > 0);
+        const cls = s.status === "running" ? (busy ? "running" : "idle") : s.status;
+        const count = first ? s.out + s.duplicates : s.done;
+        const queued = s.done + s.in_flight + s.waiting;
+        // progress: later steps = processed / everything handed to them; step 1 = results / Max results (if set)
+        const pct = first
+          ? (stats.max_items ? Math.min(100, (count / stats.max_items) * 100) : s.status === "running" ? null : 100)
+          : queued ? (s.done / queued) * 100 : s.status === "running" ? 0 : 100;
         const hitLabel = hitLabels[s.group];
+        const hitPct = hitLabel && s.done ? Math.round((s.hits / s.done) * 100) : null;
         return (
-          <div key={i} style={{ display: "contents" }}>
-            <div className={"stage " + cls}>
-              <div className="stage-h" title={s.label}><span className="dot" /><span className="num">{i + 1}</span><span className="label">{s.label}</span></div>
-              <div className="big">{(i === 0 ? s.out + s.duplicates : s.done).toLocaleString()}</div>
-              <div className="muted">{i === 0 ? "results" : "processed"}</div>
-              {i > 0 && <><Kv k="working now" v={s.in_flight} /><Kv k="waiting" v={s.waiting} /></>}
-              {hitLabel && i > 0 && <Kv k={hitLabel} v={s.hits} />}
-              {s.dedupe_on && <Kv k={`duplicate ${s.dedupe_on}s skipped`} v={s.duplicates} />}
-              <Kv k="passed on" v={s.out} />
-              {s.filtered > 0 && <Kv k="removed by filter" v={s.filtered} />}
-              {s.skipped > 0 && <Kv k={`skipped (no ${byId[s.id]?.needs ?? "input"})`} v={s.skipped} />}
-              {s.errors > 0 && <Kv k="errors" v={s.errors} cls="err" />}
-              {(s.cached ?? 0) > 0 && <Kv k="from cache (free)" v={s.cached!} />}
-              <Kv k="records" v={s.records} />
+          <div key={i} className={"flow-row " + cls}>
+            <span className="num">{i + 1}</span>
+            <div className="flow-main">
+              <div className="flow-top">
+                <b title={s.label}>{s.label}</b>
+                <span className={"group-tag " + s.group}>{s.group}</span>
+                <span className="flow-state"><span className="dot" />{STATE[s.status] ?? (busy ? "Working" : "Waiting")}</span>
+              </div>
+              <div className={"flow-bar" + (pct == null ? " indeterminate" : "")}><div style={{ width: pct == null ? undefined : `${pct}%` }} /></div>
+              <div className="flow-facts">
+                {!first && s.in_flight > 0 && <Fact n={s.in_flight} label="working" />}
+                {!first && s.waiting > 0 && <Fact n={s.waiting} label="waiting" />}
+                {hitLabel && s.hits > 0 && <span className="fact good"><b>{s.hits.toLocaleString()}</b> {hitLabel}{hitPct != null && <em>{hitPct}%</em>}</span>}
+                {s.dedupe_on && s.duplicates > 0 && <Fact n={s.duplicates} label={`duplicate ${s.dedupe_on}s skipped`} />}
+                {s.filtered > 0 && <Fact n={s.filtered} label="removed by filter" />}
+                {s.skipped > 0 && <Fact n={s.skipped} label={`skipped (no ${byId[s.id]?.needs ?? "input"})`} />}
+                {s.errors > 0 && <Fact n={s.errors} label="errors" cls="bad" />}
+                {(s.cached ?? 0) > 0 && <Fact n={s.cached ?? 0} label="from cache" />}
+                <Fact n={s.records} label="records" cls="quiet" />
+              </div>
             </div>
+            <div className="flow-count"><b>{count.toLocaleString()}</b><small>{first ? "results" : "processed"}</small></div>
           </div>
         );
       })}
-      <div className={"stage " + (allDone ? "done" : "")}>
-        <div className="stage-h"><span className="dot" /><span className="num"><IconCheck size={11} /></span>Save</div>
-        <div className="big">{stats.saved.toLocaleString()}</div>
-        <div className="muted">rows saved</div>
+      <div className={"flow-row save " + (allDone ? "done" : "")}>
+        <span className="num"><IconCheck size={12} /></span>
+        <div className="flow-main">
+          <div className="flow-top"><b>Saved leads</b></div>
+          <div className="flow-facts"><span className="fact quiet">Rows that finished every step</span></div>
+        </div>
+        <div className="flow-count"><b>{stats.saved.toLocaleString()}</b><small>saved</small></div>
       </div>
-    </>
+    </div>
   );
 }

@@ -250,7 +250,10 @@ export class Worker {
         where r.status = 'running' and not r.source_done and not p.exhausted
           and (p.lease_until is null or p.lease_until < now())
           and (select count(*) from (select 1 from items where run_id = r.id and status = 1 limit ${BACKLOG_LIMIT}) b) < ${BACKLOG_LIMIT}
-        order by r.created_at, p.pages, p.shard limit 1
+        -- fair share between jobs: the job with the fewest parts being fetched right now goes first,
+        -- then the part with the fewest pages, so two jobs page their searches 50-50
+        order by (select count(*) from run_sources q where q.run_id = p.run_id and q.lease_until > now()),
+          p.pages, r.created_at, p.shard limit 1
         for update of p skip locked
       ) x
       where s.run_id = x.run_id and s.shard = x.shard
