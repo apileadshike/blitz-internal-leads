@@ -17,7 +17,7 @@
 import { AuthenticationError, InsufficientRecordsError, APIStatusError, type BlitzAPI } from "blitz-api-js";
 import type { ISql } from "postgres";
 import { sql } from "../pg";
-import { STEP_BY_ID, splitSearch, type Item, type Rec, type StepCtx } from "../steps";
+import { MAX_SPLITS, SEARCH_CAP, STEP_BY_ID, splitSearch, type Item, type Rec, type StepCtx } from "../steps";
 import { describeError, hasInput, isTransient } from "./common";
 import { cacheEnabled, cachedClient, pruneCache } from "./cache";
 import { deleteFiles, type Store } from "../storage";
@@ -513,6 +513,7 @@ export class Worker {
         const items: Item[] = [];
         let records = 0, gotPage = false;
         let cursor: string | null = null;
+        let total: number | null = null;
         const fromCache = { hits: 0 };
         const ctx: StepCtx = {
           client: this.lookupClient(run, def.noCache, fromCache),
@@ -525,6 +526,7 @@ export class Worker {
           startCursor: part.cursor ?? undefined,
           pagesDone: part.pages,
           saveCursor: (c) => { cursor = c; gotPage = true; },
+          onTotal: (n) => { total = n; },
         };
         try {
           for await (const it of def.source!(part.params ?? stepParams(run, 0), ctx)) items.push(it);
@@ -545,8 +547,24 @@ export class Worker {
         }
         this.sourceErrors.delete(errKey);
         // This part has no more results (a pasted list is read in one go).
-        const partDone = !gotPage || cursor === null || items.length === 0;
-        if (partDone && part.label) logs.push({ stage: def.label, message: `${tag}Finished: ${(part.count + items.length).toLocaleString()} results` });
+        let partDone = !gotPage || cursor === null || items.length === 0;
+        // More matches than Blitz returns for one search (50,000): split this part again on another
+        // filter (job level, job function, continent, industry…) so every piece fits under the cap.
+        // Its first page is kept; the smaller parts find those people again and skip them as duplicates.
+        let sub: { label: string; params: Rec | null }[] = [];
+        const matches = total as number | null;
+        if (paged && part.pages === 0 && !partDone && matches != null && matches > SEARCH_CAP) {
+          // As many pieces as allowed (not just enough on paper): matches are rarely spread evenly.
+          const split = splitSearch(def, part.params ?? stepParams(run, 0), Math.max(2, MAX_SPLITS), true);
+          if (split.length > 1) {
+            sub = split.map((x) => ({ label: part.label ? `${part.label} · ${x.label}` : x.label, params: x.params }));
+            partDone = true;
+            logs.push({ stage: def.label, message: `${tag}${matches.toLocaleString()} match, more than the ${SEARCH_CAP.toLocaleString()} Blitz returns per search: splitting it into ${sub.length} smaller parts` });
+          } else {
+            logs.push({ stage: def.label, message: `${tag}${matches.toLocaleString()} match, but Blitz returns at most ${SEARCH_CAP.toLocaleString()} per search and there is no filter left to split it by` });
+          }
+        }
+        if (partDone && part.label && !sub.length) logs.push({ stage: def.label, message: `${tag}Finished: ${(part.count + items.length).toLocaleString()} results` });
 
         let kept = true;
         let limitHit = 0;
@@ -566,6 +584,14 @@ export class Worker {
                 update run_sources set cursor = ${newCursor}, pages = pages + ${gotPage ? 1 : 0},
                                        count = count + ${items.length}, exhausted = exhausted or ${partDone}
                 where run_id = ${runId} and shard = ${shard}`;
+              if (sub.length) {
+                // New shard numbers after the highest one (one splitter per run at a time).
+                await tx`select pg_advisory_xact_lock(hashtext(${"split:" + runId}))`;
+                await tx`
+                  insert into run_sources (run_id, shard, label, params, pages, count)
+                  select ${runId}::text, (select coalesce(max(shard), -1) from run_sources where run_id = ${runId}) + i::int, l, p::jsonb, 0, 0
+                  from unnest(${sub.map((x) => x.label)}::text[], ${sub.map((x) => JSON.stringify(x.params))}::text[]) with ordinality as t(l, p, i)`;
+              }
               await addLogs(tx, runId, logs);
               const [u] = await tx<{ source_count: number; max_items: number }[]>`
                 update runs set source_count = source_count + ${items.length}, source_pages = source_pages + ${gotPage ? 1 : 0},
@@ -645,6 +671,11 @@ export class Worker {
         delete from exports where created_at < now() - interval '7 days' returning path, store`;
       for (const store of ["r2", "supabase"] as const)
         await deleteFiles(oldExports.flatMap((x) => (x.path && (x.store ?? "supabase") === store ? [x.path] : [])), store);
+      // A lead's queue row is dead weight once it is saved (done) or dropped: nothing reads it again
+      // (failures are kept in item_failures). Clear them as we go, so a big run can't fill the disk.
+      await sql`delete from items where id in (select id from items where status in (${ITEM.done}, ${ITEM.dropped}) limit 50000)`;
+      // A finished run's own duplicate check is only needed while it runs.
+      await sql`delete from run_seen where run_id in (select id from runs where status in ('done', 'error') and finished_at < now() - interval '10 minutes')`;
       // Finished runs don't need their queue rows any more (saved leads are in "rows").
       await sql`
         with old as (select id from runs where status = 'done' and finished_at < now() - interval '3 days')

@@ -6,7 +6,7 @@
 //   source  → produces items from filters or a pasted list   (always step 1)
 //   expand  → one item in, many out (company → its people / its jobs)
 //   enrich  → one item in, same item out with more columns
-import { INDUSTRY, EMPLOYEE_RANGE, type BlitzAPI } from "blitz-api-js";
+import { INDUSTRY, EMPLOYEE_RANGE, JOB_LEVEL, JOB_FUNCTION, CONTINENT, type BlitzAPI } from "blitz-api-js";
 import { flatten, normUrl, savedPeople, uploadRows, watchIsNew } from "./db";
 
 export type Entity = "company" | "person" | "job";
@@ -35,6 +35,8 @@ export type StepCtx = {
   pagesDone?: number;
   /** Called after every page with the cursor for the next page (null = no more results). */
   saveCursor(cursor: string | null): void;
+  /** Called with Blitz's "how many match" number, when a page reports it. */
+  onTotal?(total: number): void;
 };
 
 export type StepDef = {
@@ -74,8 +76,17 @@ export type StepDef = {
   split?: SplitDim[];
 };
 
-/** A filter a search can be split on. `all`: values to split into when the filter is left empty. */
-export type SplitDim = { path: string[]; label: string; all?: readonly string[] };
+/**
+ * A filter a search can be split on. `all`: values to split into when the filter is left empty.
+ * `refineOnly`: that full list is only used to split a part that has more matches than Blitz
+ * returns per search (not for the first split), because not every record may have a value.
+ */
+export type SplitDim = { path: string[]; label: string; all?: readonly string[]; refineOnly?: boolean; maxItems?: number };
+// Checked against Blitz (people search): job level, job function, company HQ continent and industry
+// each cover ~100% of the matches. Person continent covered only 89%, so it is not used.
+
+/** Blitz returns at most this many results for one search, however many match. */
+export const SEARCH_CAP = 50_000;
 
 // Where each search keeps its splittable filters (see the Blitz request types).
 const COMPANY_SPLITS: SplitDim[] = [
@@ -83,13 +94,14 @@ const COMPANY_SPLITS: SplitDim[] = [
   // (checked against Blitz: the parts add up to the unsplit total, about 1% overlap).
   { path: ["company", "employee_range"], label: "employee range", all: EMPLOYEE_RANGE },
   { path: ["company", "hq", "country_code"], label: "HQ country" },
-  { path: ["company", "industry", "include"], label: "industry" },
+  { path: ["company", "industry", "include"], label: "industry", all: INDUSTRY, refineOnly: true, maxItems: 50 },
+  { path: ["company", "hq", "continent"], label: "HQ continent", all: CONTINENT, refineOnly: true },
 ];
 const PEOPLE_SPLITS: SplitDim[] = [
   ...COMPANY_SPLITS,
   { path: ["people", "location", "country_code"], label: "person country" },
-  { path: ["people", "job_level"], label: "job level" },
-  { path: ["people", "job_function"], label: "job function" },
+  { path: ["people", "job_level"], label: "job level", all: JOB_LEVEL, refineOnly: true },
+  { path: ["people", "job_function"], label: "job function", all: JOB_FUNCTION, refineOnly: true },
 ];
 const JOB_SPLITS: SplitDim[] = [
   { path: ["company", "size", "include"], label: "company size" },
@@ -106,22 +118,28 @@ export const MAX_SPLITS = Math.max(1, Number(process.env.SEARCH_SPLITS ?? 8));
  * Split a search into parts that don't overlap, so they can be paged at the same time.
  * Uses the filter that gives the most parts: one the user filled with several values,
  * or one left empty that has a known full list (employee range). One part = no split.
+ * `refine`: splitting a part that has too many matches; also uses the refine-only lists
+ * (job level, job function, continent, industry), the smallest list that gives `max` parts first.
  */
-export function splitSearch(def: StepDef, params: Rec, max = MAX_SPLITS): { label: string; params: Rec | null }[] {
+export function splitSearch(def: StepDef, params: Rec, max = MAX_SPLITS, refine = false): { label: string; params: Rec | null }[] {
   const whole = [{ label: "", params: null }];
   if (!def.split || max < 2) return whole;
   let best: { dim: SplitDim; values: string[] } | undefined;
+  const rank = (n: number) => (refine ? (n >= max ? 1000 - n : n) : n); // refine: enough parts, fewest groups
   for (const dim of def.split) {
     const cur = getPath(params, dim.path);
-    const values = Array.isArray(cur) && cur.length ? cur.map(String) : (cur == null || (Array.isArray(cur) && !cur.length)) && dim.all ? [...dim.all] : [];
-    if (values.length >= 2 && values.length > (best?.values.length ?? 1)) best = { dim, values };
+    const empty = cur == null || (Array.isArray(cur) && !cur.length);
+    const values = Array.isArray(cur) && cur.length ? cur.map(String) : empty && dim.all && (refine || !dim.refineOnly) ? [...dim.all] : [];
+    if (values.length >= 2 && (!best || rank(values.length) > rank(best.values.length))) best = { dim, values };
   }
   if (!best) return whole;
   // More values than parts: group them (e.g. 12 countries into 8 parts).
-  const n = Math.min(max, best.values.length);
+  // Blitz takes at most maxItems values in one filter (industry: 50), so a long list may need more groups.
+  const n = Math.max(Math.min(max, best.values.length), Math.ceil(best.values.length / (best.dim.maxItems ?? Infinity)));
   const groups: string[][] = Array.from({ length: n }, () => []);
   best.values.forEach((v, i) => groups[i % n].push(v));
-  return groups.map((g) => ({ label: `${best!.dim.label} ${g.join(", ")}`, params: setPath(structuredClone(params), best!.dim.path, g) }));
+  const name = (g: string[]) => (g.length > 3 ? `${g.slice(0, 2).join(", ")} +${g.length - 2} more` : g.join(", "));
+  return groups.map((g) => ({ label: `${best!.dim.label} ${name(g)}`, params: setPath(structuredClone(params), best!.dim.path, g) }));
 }
 
 function getPath(o: unknown, path: string[]): unknown {
@@ -194,6 +212,7 @@ async function* cursorPaged(call: (p: Rec) => Paged, params: Rec, ctx: StepCtx):
     ctx.charge(page.response);
     pageNo++;
     const total = page.response.total_results;
+    if (total != null) ctx.onTotal?.(Number(total));
     ctx.log(`Page ${pageNo}: ${page.data.length} results${total != null ? ` (${Number(total).toLocaleString()} match in Blitz)` : ""}`);
     for (const x of page.data.slice(0, remaining)) yield x;
     remaining -= page.data.length;
