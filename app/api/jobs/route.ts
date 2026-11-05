@@ -3,24 +3,28 @@ import { recentAlerts, createJob, schedulerSettings, spentToday, JOBS_DIR } from
 import { validateSteps, type RunOptions } from "@/lib/engine/common";
 import { clamp, json } from "@/lib/http";
 import { sql } from "@/lib/pg";
-import type { Rec } from "@/lib/steps";
+import { STEP_BY_ID, type Rec } from "@/lib/steps";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   const { scheduler } = runtime();
-  const jobs = await scheduler.view();
-  return json({
-    jobs,
-    settings: await schedulerSettings(),
-    spent_today: await spentToday(),
-    running: jobs.filter((j) => j.live).length,
-    alerts: await recentAlerts(),
-    jobs_dir: JOBS_DIR,
+  // Independent lookups at the same time: the Jobs page polls this every 2 seconds.
+  const [jobs, settings, spent_today, alerts, beat] = await Promise.all([
+    scheduler.view(),
+    schedulerSettings(),
+    spentToday(),
+    recentAlerts(),
     // EXECUTION=worker: the separate worker's last heartbeat (null = it never ran)
-    worker_seen: process.env.EXECUTION === "worker"
-      ? (await sql<{ value: string }[]>`select value from settings where key = 'worker_heartbeat'`)[0]?.value ?? null
-      : undefined,
+    process.env.EXECUTION === "worker" ? sql<{ value: string }[]>`select value from settings where key = 'worker_heartbeat'` : Promise.resolve(null),
+  ]);
+  return json({
+    jobs: jobs.map((j) => ({ ...j, steps: j.steps.map((id) => STEP_BY_ID.get(id)?.label ?? id) })), // step names, not ids
+    settings, spent_today,
+    running: jobs.filter((j) => j.live).length,
+    alerts,
+    jobs_dir: JOBS_DIR,
+    worker_seen: beat ? beat[0]?.value ?? null : undefined,
   });
 }
 

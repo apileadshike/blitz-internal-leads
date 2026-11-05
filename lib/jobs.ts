@@ -485,10 +485,15 @@ export class Scheduler {
   async view() {
     const jobs = await listJobs();
     const ids = jobs.map((j) => j.run_id).filter((x): x is string => !!x);
-    const runs = new Map((ids.length ? await sql<RunRow[]>`select * from runs_light where id = any(${ids}::text[])` : []).map((r) => [r.id, r]));
-    const failed = new Map((ids.length ? await sql<{ run_id: string; n: number }[]>`
-      select run_id, count(distinct coalesce(item_key, id::text))::int as n from item_failures
-      where run_id = any(${ids}::text[]) and not retried group by run_id` : []).map((r) => [r.run_id, r.n]));
+    // Both lookups at the same time (each is a round trip to the database).
+    const [runRows, failedRows] = ids.length ? await Promise.all([
+      sql<RunRow[]>`select * from runs_light where id = any(${ids}::text[])`,
+      sql<{ run_id: string; n: number }[]>`
+        select run_id, count(distinct coalesce(item_key, id::text))::int as n from item_failures
+        where run_id = any(${ids}::text[]) and not retried group by run_id`,
+    ]) : [[], []];
+    const runs = new Map(runRows.map((r) => [r.id, r]));
+    const failed = new Map(failedRows.map((r) => [r.run_id, r.n]));
     return jobs.map((j) => {
       const run = j.run_id ? runs.get(j.run_id) : undefined;
       const st = "record_budget" in j.settings ? settingsOf(j) : null;

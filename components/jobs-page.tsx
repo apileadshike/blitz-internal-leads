@@ -26,6 +26,21 @@ function ago(iso: string | null) {
 const post = (url: string, body?: unknown) =>
   fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
 
+/** Label on a button while its action runs. */
+const PENDING: Record<string, string> = {
+  run: "Starting…", pause: "Pausing…", resume: "Resuming…", retry: "Retrying…", restart: "Restarting…",
+  rerun: "Re-running…", delete: "Deleting…",
+};
+/** How a job looks right after a click, before the server confirms (null = gone). */
+const OPTIMISTIC: Record<string, (j: Job) => Partial<Job> | null> = {
+  run: () => ({ status: "running", note: "Starting…", error: null }),
+  pause: (j) => (j.live ? { stopping: true } : { status: "paused" }),
+  resume: () => ({ status: "waiting", error: null }),
+  retry: () => ({ status: "waiting", error: null }),
+  restart: () => ({ status: "waiting", error: null, rows: 0, pages: 0, records: 0 }),
+  delete: () => null,
+};
+
 export function JobsPage() {
   const [data, setData] = useState<JobsData | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -33,10 +48,15 @@ export function JobsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const dragging = useRef<number | null>(null);
 
+  // Bumped by every button click: a refresh that started before the click is thrown away,
+  // so it can't undo the change the click just showed.
+  const actions = useRef(0);
   const load = useCallback(async () => {
     if (dragging.current !== null) return;
+    const seq = actions.current;
     try {
       const d: JobsData = await (await fetch("/api/jobs")).json();
+      if (seq !== actions.current) return;
       setData(d);
       setSettings((s) => s ?? d.settings);
     } catch { /* server restarting */ }
@@ -58,8 +78,18 @@ export function JobsPage() {
       confirmLabel: "Start over",
     }))) return;
     setBusy(`${job.id}:${action}`);
-    const r = await post(`/api/jobs/${job.id}/${action}`);
-    if (!r.ok) void dialog.alert("That didn't work", (await r.json()).error);
+    actions.current++;
+    // Show the result at once; the refresh right after the request confirms it.
+    const patch = OPTIMISTIC[action]?.(job);
+    if (patch !== undefined) {
+      setData((d) => d && {
+        ...d,
+        jobs: patch === null ? d.jobs.filter((x) => x.id !== job.id) : d.jobs.map((x) => (x.id === job.id ? { ...x, ...patch } : x)),
+      });
+    }
+    const r = await post(`/api/jobs/${job.id}/${action}`).catch(() => null);
+    actions.current++;
+    if (!r?.ok) void dialog.alert("That didn't work", r ? (await r.json().catch(() => ({}))).error ?? "The server didn't answer." : "The server didn't answer.");
     setBusy(null);
     load();
   };
@@ -153,8 +183,11 @@ export function JobsPage() {
             const status = j.live && j.stopping ? "stopping" : j.status;
             const due = j.status === "waiting" && j.next_run_at && new Date(j.next_run_at) > new Date() ? `next run ${ago(j.next_run_at)}` : "";
             const pct = j.record_budget ? Math.min(100, (100 * j.records) / j.record_budget) : 0;
+            const mine = busy?.startsWith(`${j.id}:`);
             const btn = (action: string, label: string, cls = "secondary small") => (
-              <button className={cls} disabled={busy === `${j.id}:${action}`} onClick={() => act(j, action)}>{label}</button>
+              <button className={cls} disabled={mine} onClick={() => void act(j, action)}>
+                {busy === `${j.id}:${action}` ? PENDING[action] ?? "Working…" : label}
+              </button>
             );
             return (
               <article key={j.id} draggable className={"job-card " + status + (dragging.current === j.id ? " dragging" : "")}

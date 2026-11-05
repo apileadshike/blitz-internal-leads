@@ -180,12 +180,23 @@ export function Builder() {
   };
 
   // ── run ──
+  // Button feedback: shown the moment a button is clicked, and it can't be clicked twice
+  // (a second click on Run now would start a second run).
+  const [pending, setPending] = useState<"start" | "stop" | "rerun" | null>(null);
   const start = async (override?: Partial<Pipeline>) => {
+    if (pending) return;
     setFormError("");
-    const r = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...currentPipeline(), ...override }) });
-    const j = await r.json();
-    if (!r.ok) return setFormError(j.error);
-    watch(j.id);
+    setPending("start");
+    try {
+      const r = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...currentPipeline(), ...override }) });
+      const j = await r.json();
+      if (!r.ok) return setFormError(j.error);
+      watch(j.id);
+    } catch (e) {
+      setFormError(`Couldn't start the run: ${(e as Error).message}`);
+    } finally {
+      setPending(null);
+    }
   };
 
   // ── Cost preview + "Test 10 rows" ──
@@ -231,14 +242,30 @@ export function Builder() {
     const est = Math.max(10, estimateRecords(steps, byId, 10));
     void start({ maxItems: 10, maxRecords: Math.min(est, Number(maxRecords) || est) });
   };
-  const stop = () => { if (runId) fetch(`/api/runs/${runId}/stop`, { method: "POST" }); };
+  /** Stop at once in the page; the live view confirms within a second. "Stopping…" stays until it does. */
+  const stop = async () => {
+    if (!runId || pending) return;
+    setPending("stop");
+    try {
+      const r = await fetch(`/api/runs/${runId}/stop`, { method: "POST" });
+      if (!r.ok) { setPending(null); setFormError("Couldn't stop the run. Try again."); }
+    } catch {
+      setPending(null);
+      setFormError("Couldn't stop the run. Try again.");
+    }
+  };
   /** Put the leads whose step failed back into the queue at that step, and watch again. */
   const rerunFailed = async () => {
-    if (!runId) return;
-    const r = await fetch(`/api/runs/${runId}/rerun-failed`, { method: "POST" });
-    const j = await r.json();
-    if (!r.ok) return setFormError(j.error);
-    watch(runId);
+    if (!runId || pending) return;
+    setPending("rerun");
+    try {
+      const r = await fetch(`/api/runs/${runId}/rerun-failed`, { method: "POST" });
+      const j = await r.json();
+      if (!r.ok) return setFormError(j.error);
+      watch(runId);
+    } finally {
+      setPending(null);
+    }
   };
 
   // ── Create job: one click, everything comes from the form ──
@@ -398,7 +425,7 @@ export function Builder() {
         else if (ev.type === "row") rowBuffer.current.push(ev.row);
         else if (ev.type === "cursor") { cursor.log = ev.log; cursor.row = ev.row; }
         else if (ev.type === "reconnect") { done = true; es.close(); setTimeout(connect, 300); }
-        else if (ev.type === "finished") { done = true; es.close(); setRunning(false); }
+        else if (ev.type === "finished") { done = true; es.close(); setRunning(false); setPending((p) => (p === "stop" ? null : p)); }
       };
       es.onerror = () => {
         if (done) return;
@@ -634,20 +661,20 @@ export function Builder() {
 
           <div className="actionbar">
             <div className="primary-row">
-              <button type="button" className="big-btn" onClick={() => void start()} disabled={running || !steps.length || !!uploading}
-                title="Run now with Max results from step 1, and watch it live"><IconPlay size={12} /> Run now</button>
+              <button type="button" className="big-btn" onClick={() => void start()} disabled={running || !!pending || !steps.length || !!uploading}
+                title="Run now with Max results from step 1, and watch it live"><IconPlay size={12} /> {pending === "start" ? "Starting…" : "Run now"}</button>
               <button type="button" className="secondary big-btn" onClick={createJob} disabled={creating || !steps.length || !!uploading}
                 title="Add this pipeline to the job queue. It runs in the background until the list or search is done.">
                 {creating ? "Creating…" : uploading ? "Uploading list…" : "Create job"}
               </button>
             </div>
             <div className="secondary-row">
-              <button type="button" className="ghost small" onClick={testTen} disabled={running || !steps.length || !!uploading} title="Run only the first 10 rows now, to check the results">Test 10 rows</button>
+              <button type="button" className="ghost small" onClick={testTen} disabled={running || !!pending || !steps.length || !!uploading} title="Run only the first 10 rows now, to check the results">Test 10 rows</button>
               <button type="button" className="ghost small" onClick={() => void estimateCost()} disabled={previewing || !steps.length}
                 title="Estimate the cost. For a search this asks Blitz how many matches there are (uses 1 record).">
                 {previewing ? "Checking…" : "Estimate cost"}
               </button>
-              <button type="button" className="danger small" onClick={stop} disabled={!running}><IconStop size={11} /> Stop</button>
+              <button type="button" className="danger small" onClick={() => void stop()} disabled={!running || pending === "stop"}><IconStop size={11} /> {pending === "stop" ? "Stopping…" : "Stop"}</button>
             </div>
           </div>
           {preview && <div className="preview-line">{preview}</div>}
@@ -708,7 +735,7 @@ export function Builder() {
             {runId && !running && (stats?.failed ?? 0) > 0 && (
               <div className="rerun-line">
                 {stats!.failed} lead(s) had a step fail (see the <b>Failed step</b> column).
-                <button type="button" className="small" onClick={() => void rerunFailed()}><IconRefresh size={12} /> Re-run failed</button>
+                <button type="button" className="small" onClick={() => void rerunFailed()} disabled={!!pending}><IconRefresh size={12} /> {pending === "rerun" ? "Re-running…" : "Re-run failed"}</button>
                 <span className="muted">Only those leads, from the step that failed.</span>
               </div>
             )}
