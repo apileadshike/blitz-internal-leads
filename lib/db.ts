@@ -66,13 +66,26 @@ export async function rowsFor(runId?: string | string[]): Promise<Rec[]> {
   return (await q).map((r) => r.data);
 }
 
-export async function counts() {
-  const [c] = await sql<{ rows: number; people: number; companies: number }[]>`
-    select
-      (select count(*)::int from rows) as rows,
-      (select count(*)::int from seen where kind = 'person') as people,
-      (select count(*)::int from seen where kind = 'company') as companies`;
-  return c;
+/**
+ * Approximate totals for the builder header. Instant: read from Postgres's table statistics
+ * (kept up to date by autovacuum) instead of counting millions of rows one by one, which
+ * took minutes and made the builder page time out.
+ */
+export async function counts(): Promise<{ rows: number | null; people: number | null; companies: number | null }> {
+  try {
+    const [c] = await sql<{ rows: string | null; people: string | null; companies: string | null }[]>`
+      with t as (select relname, greatest(reltuples, 0)::float8 as n from pg_class
+                 where oid in ('public.rows'::regclass, 'public.seen'::regclass)),
+           f as (select u.v, u.f from pg_stats s, unnest(s.most_common_vals::text::text[], s.most_common_freqs) as u(v, f)
+                 where s.schemaname = 'public' and s.tablename = 'seen' and s.attname = 'kind')
+      select (select n from t where relname = 'rows')::bigint as rows,
+             ((select n from t where relname = 'seen') * coalesce((select f from f where v = 'person'), 1))::bigint as people,
+             ((select n from t where relname = 'seen') * coalesce((select f from f where v = 'company'), 0))::bigint as companies`;
+    const num = (v: string | null) => (v == null ? null : Number(v));
+    return { rows: num(c.rows), people: num(c.people), companies: num(c.companies) };
+  } catch {
+    return { rows: null, people: null, companies: null }; // the numbers are only informational
+  }
 }
 
 // ── "Only new since last run" ───────────────────────────────────────────────

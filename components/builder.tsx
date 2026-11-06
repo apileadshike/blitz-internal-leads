@@ -130,12 +130,14 @@ export function Builder() {
   // Boot: step catalog + account info, default recipe, and "Watch" links from the Jobs page.
   useEffect(() => {
     setSaved(loadSaved());
-    Promise.all([fetch("/api/steps").then((r) => r.json()), fetch("/api/meta").then((r) => r.json())]).then(([cat, meta]: [CatalogStep[], any]) => {
+    // Account info is only shown in the header: if it fails, the builder still opens.
+    const metaReq = fetch("/api/meta").then((r) => r.json()).catch(() => ({}));
+    Promise.all([fetch("/api/steps").then((r) => r.json()), metaReq]).then(([cat, meta]: [CatalogStep[], any]) => {
       setCatalog(cat);
-      const a = meta.account;
-      setAccount(a?.error
-        ? { error: a.error }
-        : { plan: a.active_plans?.[0]?.name ?? "plan", left: Number(a.records_remaining), rps: a.max_requests_per_seconds, people: meta.db.people, companies: meta.db.companies });
+      const a = meta?.account;
+      setAccount(!a || a.error
+        ? { error: a?.error ?? "Could not load account info" }
+        : { plan: a.active_plans?.[0]?.name ?? "plan", left: Number(a.records_remaining), rps: a.max_requests_per_seconds, people: meta.db?.people ?? undefined, companies: meta.db?.companies ?? undefined });
       const first = Object.keys(PRESETS)[0];
       loadPipeline(PRESETS[first], Object.fromEntries(cat.map((s) => [s.id, s])));
       setPreset("p:" + first); // the default recipe is loaded, so show its name
